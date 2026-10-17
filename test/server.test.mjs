@@ -23,9 +23,14 @@ const get = async (path) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = async (room, id) => (await get(`/api/rooms/${room}`)).data.participants.find((p) => p.id === id);
 
-const { data: { room } } = await post('/api/rooms', {});
-const a = (await post(`/api/rooms/${room}/join`, { name: 'Aditya' })).data;
+// Making a room makes you its host.
+const { data: { room, ...a } } = await post('/api/rooms', { name: 'Aditya' });
 const b = (await post(`/api/rooms/${room}/join`, { name: 'Bea' })).data;
+
+await t('the creator is the host, and nobody else is', async () => {
+  assert.equal((await find(room, a.id)).host, true);
+  assert.equal((await find(room, b.id)).host, false);
+});
 
 await t('room codes are 8 readable characters', () => assert.match(room, /^[A-HJKMNP-Z2-9]{8}$/));
 await t('the page and its scripts are served', async () => {
@@ -135,23 +140,43 @@ await t('leaving removes you', async () => {
   assert.equal((await post(`/api/rooms/${room}/report`, { secret: b.secret })).status, 403);
 });
 
-await t('the last one out closes the room, and watchers are told', async () => {
-  const ctl = new AbortController();
-  const res = await fetch(`${BASE}/api/rooms/${room}/events`, { signal: ctl.signal });
+// Opens a stream, runs `act`, and returns everything the stream said until the
+// server ended it.
+const streamUntilClosed = async (code, act) => {
+  const res = await fetch(`${BASE}/api/rooms/${code}/events`);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  const left = await post(`/api/rooms/${room}/leave`, { secret: a.secret });
-  assert.equal(left.data.closed, true);
+  const out = await act();
   let buf = '';
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += dec.decode(value);
   }
+  return { out, buf };
+};
+
+await t('the host leaving closes the room for everyone still in it', async () => {
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const c = (await post(`/api/rooms/${h.room}/join`, { name: 'Cy' })).data;
+  const d = (await post(`/api/rooms/${h.room}/join`, { name: 'Di' })).data;
+  // A guest leaving does not.
+  assert.equal((await post(`/api/rooms/${h.room}/leave`, { secret: d.secret })).data.closed, false);
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 200);
+  const { out, buf } = await streamUntilClosed(h.room, () => post(`/api/rooms/${h.room}/leave`, { secret: h.secret }));
+  assert.equal(out.data.closed, true);
+  assert.match(buf, /event: closed\ndata: \{"reason":"host"\}/);
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 404);
+  assert.equal((await post(`/api/rooms/${h.room}/report`, { secret: c.secret })).status, 404);
+});
+
+await t('a closed room cannot be rejoined', async () => {
+  // Bea has already left the main room, so this is the host leaving it empty.
+  const { out, buf } = await streamUntilClosed(room, () => post(`/api/rooms/${room}/leave`, { secret: a.secret }));
+  assert.equal(out.data.closed, true);
   assert.match(buf, /event: closed/);
   assert.equal((await get(`/api/rooms/${room}`)).status, 404);
   assert.equal((await post(`/api/rooms/${room}/join`, { name: 'late' })).status, 404);
-  ctl.abort();
 });
 
 await t('the extension origin gets CORS, nobody else does', async () => {

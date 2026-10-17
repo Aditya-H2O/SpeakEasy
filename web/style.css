@@ -84,6 +84,7 @@ em { font-style: normal; color: var(--accent); }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 6px 12px; font-size: 0.875rem; }
 .btn.big { padding: 14px 24px; font-size: 1.05rem; }
+.btn.danger { background: var(--warn); border-color: var(--warn); color: var(--surface); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
 input:not([type]), input[type="text"] {

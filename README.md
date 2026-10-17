@@ -39,8 +39,10 @@ test/server.test.mjs
 - **Rooms** are an 8-character code (about 40 bits). Joining hands out a
   per-participant secret that every write needs, so knowing the code gets you in
   but does not let you report for somebody else. Rooms live in memory, are
-  snapshotted to `SPEAKEASY_STATE_FILE` every 15s and on shutdown. **A room
-  closes when its last person presses Leave**, or 10 minutes after everyone has
+  snapshotted to `SPEAKEASY_STATE_FILE` every 15s and on shutdown. **Whoever
+  creates a room is its host.** The host's button reads *Close meeting* (it takes
+  a second click to confirm), and pressing it sends everyone out and closes the
+  room. A room also closes when its last person presses Leave, or 10 minutes after everyone has
   closed the page (no open streams, no reports), and in any case after 12 idle
   hours. Pages still open on it get an SSE `closed` event and say so. Caps: 200
   rooms, 24 people a room, 2KB bodies.
@@ -51,13 +53,13 @@ All under `/speakeasy/api/` in production (nginx strips the prefix).
 
 | | |
 | --- | --- |
-| `POST rooms` | create → `{room}` |
+| `POST rooms {name}` | create and join as host → `{room, id, secret}` |
 | `POST rooms/:code/join {name}` | → `{id, secret}` |
 | `GET rooms/:code` | snapshot |
 | `GET rooms/:code/events` | SSE stream of snapshots |
 | `POST rooms/:code/report {secret, speaking, micOn, meetingId, ms}` | |
 | `POST rooms/:code/meeting {secret, active}` | start / end |
-| `POST rooms/:code/leave {secret}` | |
+| `POST rooms/:code/leave {secret}` | the host leaving closes the room → `{closed}` |
 | `GET health` | |
 
 ## Chrome extension

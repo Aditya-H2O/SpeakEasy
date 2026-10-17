@@ -99,9 +99,11 @@
     const name = nameValue();
     if (!name) { $('lobby-error').textContent = 'Put your name in first, so the others know who you are.'; $('name').focus(); return; }
     $('create').disabled = true;
-    const r = await api('rooms', {});
+    // Making the room joins us to it as the host in the same request.
+    const r = await api('rooms', { name });
     $('create').disabled = false;
     if (!r.ok) { $('lobby-error').textContent = (r.data && r.data.error) || 'Could not create a room.'; return; }
+    store.set('room:' + r.data.room, { id: r.data.id, secret: r.data.secret });
     await enter(r.data.room, name);
   });
 
@@ -143,7 +145,15 @@
     store.set('room:' + S.code, S.me);
   }
 
-  function roomGone() {
+  const GONE = {
+    host: ['The host closed the meeting', 'Everyone has been sent out of the room, and its code no longer works.'],
+    default: ['That room is closed', 'A room closes when the host leaves, when the last person leaves, or ten minutes after everyone closes the page.'],
+  };
+
+  function roomGone(reason) {
+    const [title, text] = GONE[reason] || GONE.default;
+    $('gone-title').textContent = title;
+    $('gone-text').textContent = text;
     if (S.events) S.events.close();
     store.del('room:' + S.code);
     stopMic();
@@ -163,8 +173,12 @@
       syncMeeting();
       render();
     };
-    // The server closed the room (everyone left, or it was abandoned).
-    es.addEventListener('closed', roomGone);
+    // The server closed the room: the host left, everyone left, or it was abandoned.
+    es.addEventListener('closed', (e) => {
+      let reason;
+      try { reason = JSON.parse(e.data).reason; } catch {}
+      roomGone(reason);
+    });
     es.onerror = async () => {
       // EventSource retries on its own after a dropped connection, but gives
       // up for good on a non-200. Find out which, so a deleted room says so.
@@ -174,6 +188,11 @@
       setTimeout(connect, 3000);
     };
   }
+
+  const amHost = () => {
+    const mine = S.snap && S.me && S.snap.participants.find((p) => p.id === S.me.id);
+    return !!(mine && mine.host);
+  };
 
   // A new meeting resets the worklet's counter. Coming back into a meeting
   // already in progress (a reload) starts the counter from what the server
@@ -243,7 +262,22 @@
     setTimeout(() => ($('copy').textContent = 'Copy invite link'), 1600);
   });
 
+  // For the host this button is "Close meeting", and it sends everyone out, so
+  // it takes a second click to be sure. A second click rather than confirm():
+  // a dialog is not something to rely on in the extension's side panel.
+  let armedUntil = 0;
+  const leaveLabel = () => (amHost() ? (Date.now() < armedUntil ? 'Click again to close for everyone' : 'Close meeting') : 'Leave');
+
   $('leave').addEventListener('click', async () => {
+    if (amHost() && Date.now() >= armedUntil) {
+      armedUntil = Date.now() + 4000;
+      $('leave').textContent = leaveLabel();
+      $('leave').classList.add('danger');
+      setTimeout(() => { $('leave').textContent = leaveLabel(); $('leave').classList.toggle('danger', Date.now() < armedUntil); }, 4100);
+      return;
+    }
+    armedUntil = 0;
+    $('leave').classList.remove('danger');
     if (S.me) api(`rooms/${S.code}/leave`, { secret: S.me.secret });
     store.del('room:' + S.code);
     if (S.events) S.events.close();
@@ -371,6 +405,7 @@
     tg.textContent = live ? 'End meeting' : m ? 'Start a new meeting' : 'Start meeting';
     tg.classList.toggle('primary', !live);
     tg.classList.toggle('stop', !!live);
+    $('leave').textContent = leaveLabel();
 
     // Our own number is drawn from the local counter, which is ahead of the
     // server by up to a second; everyone else's comes from the snapshot.
@@ -403,6 +438,7 @@
         const name = li.querySelector('.person-name');
         name.textContent = p.name; // textContent, never innerHTML: names come from strangers
         if (p.id === S.me.id) name.insertAdjacentHTML('beforeend', '<span class="you">you</span>');
+        if (p.host) name.insertAdjacentHTML('beforeend', '<span class="tag">host</span>');
         if (tag) name.insertAdjacentHTML('beforeend', `<span class="tag">${tag}</span>`);
         return li;
       }),

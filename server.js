@@ -67,6 +67,7 @@ function newRoom() {
     createdAt: now(),
     touchedAt: now(),
     meeting: null, // { id, startedAt, endedAt|null }
+    hostId: null, // the participant who made the room; their leaving closes it
     participants: new Map(), // secret -> participant
     streams: new Set(),
   };
@@ -92,6 +93,7 @@ function snapshot(room) {
     participants: [...room.participants.values()].map((p) => ({
       id: p.id,
       name: p.name,
+      host: p.id === room.hostId,
       speaking: p.speaking && t - p.seenAt < LIMITS.awayMs,
       away: t - p.seenAt >= LIMITS.awayMs,
       micOn: p.micOn,
@@ -116,10 +118,11 @@ function changed(room) {
   setTimeout(() => { pending.delete(room); broadcast(room); }, 150);
 }
 
-// A room ends when its people do. Open streams are told first, so a page
-// still sitting on the room says so instead of quietly reconnecting to a 404.
-function closeRoom(room) {
-  const data = `event: closed\ndata: {}\n\n`;
+// A room ends when its host leaves, or when its people do. Open streams are
+// told first, and why, so a page still sitting on the room says so instead of
+// quietly reconnecting to a 404.
+function closeRoom(room, reason) {
+  const data = `event: closed\ndata: ${JSON.stringify({ reason })}\n\n`;
   for (const res of room.streams) { res.write(data); res.end(); }
   room.streams.clear();
   rooms.delete(room.id);
@@ -138,7 +141,7 @@ function sweep() {
   const t = now();
   for (const room of rooms.values()) {
     if (t - room.touchedAt > LIMITS.roomIdleMs || abandoned(room, t)) {
-      closeRoom(room);
+      closeRoom(room, 'abandoned');
       continue;
     }
     for (const [secret, p] of room.participants) {
@@ -153,7 +156,7 @@ function sweep() {
 
 // ---- the actions ----------------------------------------------------------
 
-export function join(room, name) {
+export function join(room, name, asHost = false) {
   if (room.participants.size >= LIMITS.participantsPerRoom) return null;
   const p = {
     id: token(6),
@@ -168,6 +171,7 @@ export function join(room, name) {
     reportedAt: now(),
   };
   room.participants.set(p.secret, p);
+  if (asHost) room.hostId = p.id;
   changed(room);
   return p;
 }
@@ -217,7 +221,7 @@ export function setMeeting(room, active) {
 function save() {
   if (!STATE_FILE || !dirty) return;
   const data = [...rooms.values()].map((r) => ({
-    id: r.id, createdAt: r.createdAt, touchedAt: r.touchedAt, meeting: r.meeting,
+    id: r.id, createdAt: r.createdAt, touchedAt: r.touchedAt, meeting: r.meeting, hostId: r.hostId,
     participants: [...r.participants.values()],
   }));
   const tmp = STATE_FILE + '.tmp';
@@ -347,10 +351,15 @@ export async function handle(req, res) {
 
   if (parts[1] !== 'rooms') return send(res, 404, { error: 'not found' });
 
+  // Making a room joins you to it as its host, in one step, so there is never
+  // a room without one.
   if (parts.length === 2 && req.method === 'POST') {
+    const body = await readJson(req);
+    if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
     const room = newRoom();
     if (!room) return send(res, 503, { error: 'too many rooms right now' });
-    return send(res, 201, { room: room.id });
+    const p = join(room, body.name, true);
+    return send(res, 201, { room: room.id, id: p.id, secret: p.secret });
   }
 
   const code = (parts[2] || '').toUpperCase();
@@ -383,11 +392,12 @@ export async function handle(req, res) {
   if (action === 'meeting') { p.seenAt = now(); setMeeting(room, !!body.active); return send(res, 200, { ok: true }); }
   if (action === 'leave') {
     room.participants.delete(p.secret);
-    // The last one out closes the room: no lingering results, no code that
-    // still works tomorrow.
-    if (room.participants.size === 0) closeRoom(room);
+    // The host leaving closes the room for everyone, and so does the last one
+    // out: no lingering results, no code that still works tomorrow.
+    const reason = p.id === room.hostId ? 'host' : room.participants.size === 0 ? 'empty' : null;
+    if (reason) closeRoom(room, reason);
     else changed(room);
-    return send(res, 200, { ok: true, closed: room.participants.size === 0 });
+    return send(res, 200, { ok: true, closed: !!reason });
   }
   return send(res, 404, { error: 'not found' });
 }
