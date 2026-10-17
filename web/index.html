@@ -6,6 +6,15 @@
     <title>SpeakEasy</title>
     <meta name="description" content="See how much of a meeting you are doing the talking." />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <!-- Link previews: what Discord (and Slack, iMessage...) shows under a
+         pasted invite. Absolute URLs, because the scrapers do not resolve
+         relative ones. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="aditya-h.com" />
+    <meta property="og:title" content="Join my SpeakEasy room" />
+    <meta property="og:description" content="Open the link on your laptop and turn on your mic. SpeakEasy shows how much of the meeting each of us is doing the talking, live." />
+    <meta property="og:image" content="https://aditya-h.com/speakeasy/icon-512.png" />
+    <meta name="theme-color" content="#e8613c" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -56,10 +65,12 @@
           <div class="code-row">
             <span id="room-code" class="code"></span>
             <button id="copy" class="btn small ghost">Copy invite link</button>
+            <button id="discord" class="btn small discord" title="Copies an invite and opens Discord, ready to paste">Share to Discord</button>
           </div>
         </div>
         <button id="leave" class="btn small ghost">Leave</button>
       </section>
+      <p id="share-note" class="share-note" role="status" hidden></p>
 
       <section class="card meeting">
         <div class="meeting-status">

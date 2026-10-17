@@ -258,6 +258,7 @@ const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
 };
 
 function send(res, status, body, headers = {}) {
@@ -287,7 +288,7 @@ function readJson(req) {
 
 function serveStatic(res, urlPath) {
   const rel = urlPath === '/' ? 'index.html' : urlPath.slice(1);
-  if (!/^[a-z0-9-]+\.(html|js|css|svg)$/.test(rel)) return send(res, 404, 'not found');
+  if (!/^[a-z0-9-]+\.(html|js|css|svg|png)$/.test(rel)) return send(res, 404, 'not found');
   fs.readFile(path.join(WEB, rel), (err, buf) => {
     if (err) return send(res, 404, 'not found');
     res.writeHead(200, {

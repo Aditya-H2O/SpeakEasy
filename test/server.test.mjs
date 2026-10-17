@@ -34,7 +34,7 @@ await t('the creator is the host, and nobody else is', async () => {
 
 await t('room codes are 8 readable characters', () => assert.match(room, /^[A-HJKMNP-Z2-9]{8}$/));
 await t('the page and its scripts are served', async () => {
-  for (const p of ['/', '/app.js', '/vad-worklet.js', '/style.css', '/icon.svg']) {
+  for (const p of ['/', '/app.js', '/vad-worklet.js', '/style.css', '/icon.svg', '/icon-512.png']) {
     const res = await fetch(BASE + p);
     assert.equal(res.status, 200, p);
     assert.match(res.headers.get('cache-control'), /max-age=0/);

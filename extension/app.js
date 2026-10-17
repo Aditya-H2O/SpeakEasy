@@ -263,6 +263,28 @@
     setTimeout(() => ($('copy').textContent = 'Copy invite link'), 1600);
   });
 
+  // Discord has no URL that pre-fills a message, so: put a ready-made invite
+  // on the clipboard, open Discord, and say "paste". The link alone unfurls
+  // into a card there, from the og: tags in index.html.
+  let noteTimer;
+  const note = (text) => {
+    $('share-note').textContent = text;
+    $('share-note').hidden = false;
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => ($('share-note').hidden = true), 9000);
+  };
+
+  $('discord').addEventListener('click', async () => {
+    const msg = `Join my SpeakEasy room so we can see who's doing the talking: ${inviteLink(S.code)}`;
+    let copied = true;
+    try { await navigator.clipboard.writeText(msg); } catch { copied = false; }
+    // Opened by the click itself, so no popup blocker objects. Discord's web
+    // app offers to hand over to the desktop app if it is installed.
+    window.open('https://discord.com/channels/@me', '_blank', 'noopener');
+    if (copied) note('Invite copied. In Discord, open the chat or channel and press Ctrl+V (Cmd+V on a Mac) to paste it.');
+    else prompt('Copy this, then paste it in Discord:', msg);
+  });
+
   // For the host this button is "Close meeting", and it sends everyone out, so
   // it takes a second click to be sure. A second click rather than confirm():
   // a dialog is not something to rely on in the extension's side panel.

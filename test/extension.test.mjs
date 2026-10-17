@@ -25,6 +25,10 @@ for (const s of ICON_SIZES) {
     assert.ok(png.equals(iconPng(s)));
   });
 }
+t('web/icon-512.png (the link-preview image) is current', () => {
+  const web = fs.readFileSync(path.join(EXT, '..', 'web', 'icon-512.png'));
+  assert.ok(web.equals(iconPng(512)));
+});
 t('every file the manifest names exists', () => {
   const m = JSON.parse(read('manifest.json'));
   assert.equal(m.manifest_version, 3);

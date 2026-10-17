@@ -84,6 +84,12 @@ em { font-style: normal; color: var(--accent); }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 6px 12px; font-size: 0.875rem; }
 .btn.big { padding: 14px 24px; font-size: 1.05rem; }
+.btn.discord { background: #5865f2; border-color: #5865f2; color: #fff; }
+.btn.discord:hover { background: #4752c4; border-color: #4752c4; }
+.share-note {
+  margin: -6px 0 16px; padding: 10px 14px; border-radius: 10px; font-size: 0.9rem;
+  background: color-mix(in srgb, #5865f2 14%, var(--surface)); border: 1px solid color-mix(in srgb, #5865f2 35%, var(--line));
+}
 .btn.danger { background: var(--warn); border-color: var(--warn); color: var(--surface); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 

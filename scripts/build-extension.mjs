@@ -103,5 +103,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   fs.copyFileSync(path.join(WEB, 'icon.svg'), path.join(EXT, 'icon.svg'));
   fs.mkdirSync(path.join(EXT, 'icons'), { recursive: true });
   for (const s of ICON_SIZES) fs.writeFileSync(path.join(EXT, 'icons', `icon-${s}.png`), iconPng(s));
+  // The web app's link-preview image (og:image), from the same mark.
+  fs.writeFileSync(path.join(WEB, 'icon-512.png'), iconPng(512));
   console.log('extension/ rebuilt from web/');
 }
