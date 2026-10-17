@@ -42,8 +42,9 @@ the transcript in its own scrolling pane; one column on narrow screens):
 - **Your speaking habits, on your screen only.** A small red card (closable)
   when you use a lot of filler words ("like", "you know", "basically"... over 8
   per 100 words, at most every 3 minutes), and when you start talking over
-  someone who was already mid-sentence (at most once a minute). Nobody else sees
-  either. Chrome's speech recognition mostly leaves "um" and "uh" out of its
+  someone who was already mid-sentence (at most once a minute). The host also
+  gets a quiet notice of the interruption on their screen (at most every 30s per
+  person); nobody else sees either. Chrome's speech recognition mostly leaves "um" and "uh" out of its
   text, so those are under-counted.
 - **The mic bar blinks** whenever no sound is reaching SpeakEasy: mic off,
   unplugged, or sending pure silence. "I'm muted" does not stop it, because that
@@ -65,6 +66,15 @@ in from the lobby; it is optional, and anyone can join a meeting without one.
 Signed-in people get a ✓ in the room. SpeakEasy never sees your password hash
 or holds the site's session key: it asks Grounds Guessr, over loopback, who your
 session cookie belongs to.
+
+**Meeting history**, at the bottom of the home page when signed in: your past
+meetings, **10 to a page** with Newer/Older buttons (no endless scroll). Open
+one for its AI summary, the talk-time table and the whole transcript, or
+download it as .txt. The host's own meetings show their flags. A meeting is
+archived when it ends and updated as its summary and last moderation results
+arrive. The host's copy and every signed-in participant's copy come from the
+same archive (`/mnt/twenty_gb_volume/speakeasy/meetings/`). Removing a meeting
+takes it off your list; the host removing it deletes it for everyone.
 
 **Yours: notes and scheduled meetings.** Signed in, they are saved to your
 account on the server (`/mnt/twenty_gb_volume/speakeasy/users/<id>.json`) and
@@ -106,6 +116,8 @@ web/transcribe.js      speech-to-text for one person (Web Speech API)
 web/personal.js        notes, scheduled meetings, to-do lists (account or localStorage)
 web/summarize.js       the host's on-device AI summary (Chrome Summarizer API)
 accounts.js            who a request is (via Grounds Guessr), and per-account data
+history.js             archived meetings and each account's paged list
+web/meetings.js        the meeting history list and viewer
 web/app.js             the room: mic, reporting, transcript, pings, nudges
 server.js              rooms, host, meeting plan, totals, transcript, flags; SSE. Zero dependencies
 moderator/             the open-weight model service (onnxruntime-node)
@@ -118,12 +130,21 @@ deploy/                systemd units for both processes
   the level sitting *sensitivity* dB above the floor for 60ms, with a 350ms
   hangover. It runs on the audio thread because during a meeting the tab is in
   the background, where timers are throttled.
+- **Only a voice counts.** Each loud frame must also be *voiced*: its waveform
+  has to repeat at a speaking pitch (70-400Hz), found by autocorrelation on an
+  8kHz copy. Claps, typing, bangs and applause are loud but not periodic, so
+  they never start or extend "speaking". Tested offline: 2s of a voice counts
+  2.1s; 2s of claps, applause or typing counts 0; a voice with claps over it
+  counts the same as the voice alone. It cannot tell *whose* voice it is, which
+  is what the headphones advice is for.
 - **Trust.** The server trusts a client about *whether* its person is speaking,
   never about how long: totals only go up, by at most the wall time since the
   last report, and never past the meeting's length. Transcript times are clamped
   inside the meeting too.
-- **Rooms** are an 8-character code (about 40 bits) plus a per-participant secret
-  for every write. A room closes when the host leaves, when the last person
+- **Rooms** have a **4-digit code**, plus a per-participant secret for every
+  write. 10,000 codes is guessable with one meeting at a time, so wrong codes are
+  rate-limited per client address: 20 misses in 10 minutes locks that address
+  out for 10 minutes. Trying every code then takes one address about 3.5 days. A room closes when the host leaves, when the last person
   leaves, 10 minutes after everyone has closed the page, or after 12 idle hours.
 
 ### The moderator
@@ -174,6 +195,9 @@ are JSON, capped at 4KB.
 | `POST rooms/:code/transcript/flag {secret, n, flagged}` | host only; `null` returns to the model's verdict |
 | `POST rooms/:code/leave {secret}` | the host leaving closes the room |
 | `POST rooms/:code/transcript/summary {secret, meetingId, text}` | host only, after the meeting ends |
+| `POST rooms/:code/interrupted {secret, victim}` | your page saw you cut in; tells the host |
+| `GET me/meetings?page=N` | your history, 10 per page, newest first |
+| `GET me/meetings/:id` / `POST me/meetings/:id/remove` | one meeting in full; take it off your list |
 | `GET me` | `{player, accounts}`: who your aditya-h.com session is |
 | `GET me/data` / `POST me/data {version, notes, plans, activePlan}` | your saved data; a stale `version` gets 409 and the newer copy |
 | `GET health` | |
@@ -221,7 +245,7 @@ needed. The checkout is on the volume: `/opt/speakeasy` → `/mnt/twenty_gb_volu
 
 ```bash
 cd /opt/speakeasy && git pull
-install -d -o www-data -g www-data /mnt/twenty_gb_volume/speakeasy/users   # first time
+install -d -o www-data -g www-data /mnt/twenty_gb_volume/speakeasy/{users,meetings}   # first time
 cd moderator && npm ci --omit=dev --ignore-scripts && npm run fetch-model && cd ..
 chown -R www-data:www-data /opt/speakeasy/       # trailing slash: it is a symlink
 cp deploy/*.service /etc/systemd/system/ && systemctl daemon-reload

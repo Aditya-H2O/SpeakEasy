@@ -119,6 +119,7 @@
     if (player) $('account-name').textContent = player.username;
     $('signin-card').hidden = !!player || !(ok && r.data.accounts);
     if (player && !$('name').value) $('name').value = player.username;
+    window.SpeakEasyHistory.setAccount(player);
     await Personal.setAccount(player);
   }
 
@@ -172,6 +173,7 @@
   async function initLobby(prefillCode, error) {
     show('lobby');
     Personal.mountNotes($('notes-slot-lobby'));
+    window.SpeakEasyHistory.refresh(); // a meeting that just ended belongs at the top
     $('name').value = store.get('name') || '';
     $('code').value = prefillCode || '';
     $('lobby-error').textContent = error || '';
@@ -210,7 +212,7 @@
     const name = nameValue();
     const code = $('code').value.trim().toUpperCase();
     if (!name) { $('lobby-error').textContent = 'Put your name in first.'; $('name').focus(); return; }
-    if (!/^[A-Z2-9]{8}$/.test(code)) { $('lobby-error').textContent = 'Room codes are 8 letters and numbers.'; $('code').focus(); return; }
+    if (!/^\d{4}$/.test(code)) { $('lobby-error').textContent = 'Room codes are 4 digits.'; $('code').focus(); return; }
     await enter(code, name);
   });
 
@@ -346,7 +348,12 @@
       if (r.status === 403) await rejoin();
       else if (r.status === 404) roomGone();
       // The host's pings to us ride back on the reply.
-      else if (r.ok && r.data.pings) for (const p of r.data.pings) toast('From the host', p.text, 'ping');
+      else if (r.ok && r.data.pings) {
+        for (const p of r.data.pings) {
+          if (p.kind === 'interrupt') toast('Interruption', p.text, 'ping'); // to the host
+          else toast('From the host', p.text, 'ping');
+        }
+      }
     } catch {
       // offline for a moment; the next tick tries again
     } finally {
@@ -693,6 +700,8 @@
     if (stillTalking && t >= interruptQuietUntil) {
       toast('You may have cut someone off', `You started talking while ${cutIn.name} was still speaking. Let them finish?`, 'warn');
       interruptQuietUntil = t + 60e3;
+      // And the host hears about it, quietly, on their own screen.
+      api(`rooms/${S.code}/interrupted`, { secret: S.me.secret, victim: cutIn.id }).catch(() => {});
     }
     cutIn = null;
   }
@@ -737,7 +746,7 @@
       // above ~3.4kHz is keyboard clatter. Neither should count as talking.
       const hp = new BiquadFilterNode(ctx, { type: 'highpass', frequency: 120 });
       const lp = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 3400 });
-      const node = new AudioWorkletNode(ctx, 'vad');
+      const node = new AudioWorkletNode(ctx, 'vad', { processorOptions: { thresholdDb: S.threshold, counting: counting() } });
       // The worklet has to be connected through to the destination or the
       // browser never pulls audio through it. Its output is silence anyway;
       // the zero gain is so that stays true.
@@ -1145,7 +1154,7 @@
   Personal.init();
   refreshMe();
   const code = (new URLSearchParams(location.search).get('r') || '').toUpperCase();
-  if (/^[A-Z2-9]{8}$/.test(code)) {
+  if (/^\d{4}$/.test(code)) {
     if (store.get('room:' + code) || store.get('name')) enter(code, store.get('name'));
     else initLobby(code);
   } else {

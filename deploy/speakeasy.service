@@ -37,6 +37,8 @@ Environment=SPEAKEASY_STATE_FILE=/var/lib/speakeasy/rooms.json
 # The directory must exist and belong to www-data; see README "Deploy".
 Environment=SPEAKEASY_ACCOUNTS_ME_URL=http://127.0.0.1:3005/groundsguessr/api/auth/me
 Environment=SPEAKEASY_USER_DIR=/mnt/twenty_gb_volume/speakeasy/users
+# Archived meetings (history.js): one file per meeting, plus each account's list.
+Environment=SPEAKEASY_MEETING_DIR=/mnt/twenty_gb_volume/speakeasy/meetings
 
 # ~45MB resident. The ceiling is a guard on a 458MB box, not a tuning knob:
 # the app's own caps (one room, 24 people, 4000 transcript lines) keep it far

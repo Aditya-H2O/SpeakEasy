@@ -332,3 +332,26 @@ input[type="password"] { font: inherit; width: 100%; padding: 10px 12px; border-
 .summary-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.92rem; }
 .summary-text:empty { display: none; }
 #summary-status:empty { display: none; }
+
+/* Meeting history (lobby, bottom) */
+.history { margin-top: 16px; }
+.history-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.history-item { all: unset; box-sizing: border-box; width: 100%; display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; align-items: baseline; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); cursor: pointer; }
+.history-item:hover { border-color: var(--muted); }
+.history-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-when { font-weight: 600; }
+.history-meta { font-size: 0.85rem; }
+.history-badges { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
+.history-badges .tag { margin: 0; padding: 1px 8px; border: 1px solid var(--line); border-radius: 99px; }
+.history-badges .tag.flag { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.pager { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+.history-view { display: grid; gap: 10px; }
+.hv-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.history-view h3 { margin: 0; }
+.history-view h4 { margin: 0 0 8px; font-size: 0.9rem; }
+.hv-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+@media (max-width: 760px) { .hv-grid { grid-template-columns: minmax(0, 1fr); } }
+.hv-people { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.hv-person { display: flex; gap: 10px; align-items: baseline; }
+.hv-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hv-lines { max-height: 60vh; }

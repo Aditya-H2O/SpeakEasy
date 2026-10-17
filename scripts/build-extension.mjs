@@ -29,7 +29,7 @@ export function sidepanelHtml() {
   return '<!-- GENERATED from web/index.html by scripts/build-extension.mjs -- edit the original. -->\n' + out;
 }
 
-export const COPIED = ['app.js', 'personal.js', 'summarize.js', 'transcribe.js', 'style.css', 'vad-worklet.js'];
+export const COPIED = ['app.js', 'personal.js', 'summarize.js', 'meetings.js', 'transcribe.js', 'style.css', 'vad-worklet.js'];
 export const copied = (name) => BANNER + fs.readFileSync(path.join(WEB, name), 'utf8');
 
 // ---- icons: the same mark as web/icon.svg, rasterised without dependencies --

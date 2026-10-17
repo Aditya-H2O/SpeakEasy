@@ -27,6 +27,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { whoami, readData, writeData, accountsEnabled, DATA_LIMITS } from './accounts.js';
+import * as history from './history.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, 'web');
@@ -89,17 +90,41 @@ let dirty = false;
 const now = () => Date.now();
 const token = (bytes) => crypto.randomBytes(bytes).toString('base64url');
 
-// Room codes are short enough to read aloud and long enough not to guess:
-// 8 characters from a 31-letter alphabet with no 0/O/1/I/L is ~40 bits, and
-// the code is all a stranger would need to join.
-const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+// Room codes are 4 digits, to read aloud and type on a phone. That is only
+// 10,000 of them, and with one meeting at a time a stranger could simply try
+// them all -- so wrong codes are rate-limited per address below (missedCode).
+// The code gets you into the room; it never lets you act as anyone in it,
+// which still takes the per-participant secret.
 function roomCode() {
-  const bytes = crypto.randomBytes(8);
-  let s = '';
-  for (const b of bytes) s += CODE_ALPHABET[b % CODE_ALPHABET.length];
-  return s;
+  return String(crypto.randomInt(0, 10000)).padStart(4, '0');
 }
-const isRoomCode = (s) => typeof s === 'string' && /^[A-Z2-9]{8}$/.test(s);
+const isRoomCode = (s) => typeof s === 'string' && /^\d{4}$/.test(s);
+
+// Guessing guard: 20 wrong codes in 10 minutes from one address, and that
+// address is refused for 10 minutes. Right codes never count. The address is
+// nginx's X-Real-IP, which is the real client behind Cloudflare
+// (nginx-cloudflare-realip.conf), so one guesser cannot lock out everyone.
+// At that rate trying all 10,000 codes takes a single address about 3.5 days.
+const misses = new Map(); // ip -> { count, since, lockedUntil }
+const MISS_LIMIT = 20;
+const MISS_WINDOW_MS = 10 * 60 * 1000;
+const clientIp = (req) => String(req.headers['x-real-ip'] || req.socket.remoteAddress || 'unknown');
+
+export function codeLocked(req) {
+  const m = misses.get(clientIp(req));
+  return !!(m && m.lockedUntil > now());
+}
+
+function missedCode(req) {
+  const ip = clientIp(req);
+  const t = now();
+  let m = misses.get(ip);
+  if (!m || t - m.since > MISS_WINDOW_MS) m = { count: 0, since: t, lockedUntil: 0 };
+  m.count++;
+  if (m.count >= MISS_LIMIT) m.lockedUntil = t + MISS_WINDOW_MS;
+  misses.set(ip, m);
+  if (misses.size > 10000) for (const [k, v] of misses) if (t - v.since > MISS_WINDOW_MS && v.lockedUntil < t) misses.delete(k);
+}
 
 function newRoom() {
   if (rooms.size >= LIMITS.rooms) sweep();
@@ -116,6 +141,7 @@ function newRoom() {
     transcript: [], // { n, meetingId, pid, name, startMs, endMs, text, scores, flag }
     lineSeq: 0,
     summaries: {}, // meeting id -> the host's on-device AI summary (summarize.js)
+    attendees: {}, // meeting id -> account ids of signed-in people who took part (history)
     streams: new Set(),
   };
   rooms.set(id, room);
@@ -175,6 +201,8 @@ function changed(room) {
 // told first, and why, so a page still sitting on the room says so instead of
 // quietly reconnecting to a 404.
 function closeRoom(room, reason) {
+  if (room.meeting && !room.meeting.endedAt) room.meeting.endedAt = now();
+  if (room.meeting) archiveMeeting(room, room.meeting.id);
   const data = `event: closed\ndata: ${JSON.stringify({ reason })}\n\n`;
   for (const res of room.streams) { res.write(data); res.end(); }
   room.streams.clear();
@@ -228,6 +256,7 @@ export function sweep() {
 // Out of the room, now. The host leaving closes it for everyone, and so does
 // the last one out: no lingering results, no code that still works tomorrow.
 export function leave(room, p) {
+  if (room.meeting && p.meetingId === room.meeting.id) noteRoster(room, room.meeting.id, p);
   room.participants.delete(p.secret);
   const reason = p.id === room.hostId ? 'host' : room.participants.size === 0 ? 'empty' : null;
   if (reason) closeRoom(room, reason);
@@ -264,7 +293,7 @@ export function join(room, name, asHost = false, account = null) {
     accountId: account ? account.id : null,
   };
   room.participants.set(p.secret, p);
-  if (asHost) room.hostId = p.id;
+  if (asHost) { room.hostId = p.id; room.hostAccount = p.accountId; }
   changed(room);
   return p;
 }
@@ -286,6 +315,12 @@ export function report(room, p, body) {
   const live = m && !m.endedAt && body.meetingId === m.id;
   if (live) {
     if (p.meetingId !== m.id) { p.meetingId = m.id; p.ms = 0; p.reportedAt = Math.max(m.startedAt, p.joinedAt); }
+    noteRoster(room, m.id, p);
+    // Signed in and taking part: this meeting goes in their history too.
+    if (p.accountId) {
+      const list = ((room.attendees ||= {})[m.id] ||= []);
+      if (!list.includes(p.accountId)) list.push(p.accountId);
+    }
     const claimed = Number(body.ms);
     if (Number.isFinite(claimed) && claimed > p.ms) {
       const ceiling = Math.min(
@@ -315,11 +350,66 @@ export function setMeeting(room, active, plan) {
   const m = room.meeting;
   if (active && !(m && !m.endedAt)) {
     room.meeting = { id: token(6), startedAt: t, endedAt: null, ...plan };
-    for (const p of room.participants.values()) { p.meetingId = room.meeting.id; p.ms = 0; p.reportedAt = t; }
+    for (const p of room.participants.values()) { p.meetingId = room.meeting.id; p.ms = 0; p.reportedAt = t; noteRoster(room, room.meeting.id, p); }
   } else if (!active && m && !m.endedAt) {
     m.endedAt = t;
+    archiveMeeting(room, m.id);
   }
   changed(room);
+}
+
+// ---- history ----------------------------------------------------------------
+//
+// An ended meeting is copied out of the room into history.js's archive, keyed
+// by room and meeting so ids can never collide. Rewritten as late things land
+// (summary, flag changes, the last moderation verdicts) and when the room
+// closes, so the archive ends up as the room last was.
+const archiveId = (room, meetingId) => `${room.id}-${meetingId}`;
+
+// Everyone who took part in a meeting, with their latest total -- kept apart
+// from the live participant list so that leaving (and the host leaving last,
+// which closes the room) cannot take anyone out of the record.
+function noteRoster(room, meetingId, p) {
+  const roster = ((room.roster ||= {})[meetingId] ||= {});
+  roster[p.id] = { name: p.name, ms: Math.round(p.ms), account: p.accountId || null, isHost: p.id === room.hostId };
+}
+
+export function archiveMeeting(room, meetingId) {
+  if (!history.historyEnabled()) return;
+  const m = room.meeting && room.meeting.id === meetingId ? room.meeting : null;
+  if (!m || !m.endedAt) return;
+  const hostP = ((room.roster || {})[meetingId] || {})[room.hostId] || [...room.participants.values()].find((q) => q.id === room.hostId);
+  for (const q of room.participants.values()) if (q.meetingId === m.id) noteRoster(room, m.id, q);
+  const people = Object.values((room.roster || {})[m.id] || {}).sort((a, b) => b.ms - a.ms);
+  try {
+    history.archive({
+      id: archiveId(room, m.id),
+      room: room.id,
+      startedAt: m.startedAt,
+      endedAt: m.endedAt,
+      plannedMs: m.plannedMs,
+      thresholdPct: m.thresholdPct,
+      hostName: hostP ? hostP.name : '',
+      hostAccount: room.hostAccount || null,
+      attendees: (room.attendees || {})[m.id] || [],
+      people,
+      summary: (room.summaries || {})[m.id] || null,
+      lines: room.transcript.filter((l) => l.meetingId === m.id).map((l) => ({
+        startMs: l.startMs, name: l.name, text: l.text, flag: l.flag, override: l.override ?? null,
+      })),
+    });
+  } catch (e) {
+    console.error('archive failed:', e.message);
+  }
+}
+
+// Moderation verdicts can land after the meeting ended; fold them in, a few
+// at a time rather than once per line.
+const archiveSoon = new Map();
+function scheduleArchive(room, meetingId) {
+  const key = archiveId(room, meetingId);
+  if (archiveSoon.has(key)) return;
+  archiveSoon.set(key, setTimeout(() => { archiveSoon.delete(key); archiveMeeting(room, meetingId); }, 3000));
 }
 
 // ---- transcript -----------------------------------------------------------
@@ -406,6 +496,7 @@ async function pumpModeration() {
       line.windowScores = scores[1] || null;
       line.flag = decideFlag(line.scores, line.windowScores);
       dirty = true;
+      if (room.meeting && room.meeting.id === line.meetingId && room.meeting.endedAt) scheduleArchive(room, line.meetingId);
     } catch (e) {
       // Down or overloaded: the line stays unchecked (the host sees that), and
       // is retried once the moderator answers again.
@@ -440,6 +531,7 @@ export function overrideFlag(room, n, flagged) {
   if (!line) return false;
   line.override = flagged === null ? null : !!flagged;
   dirty = true;
+  archiveMeeting(room, line.meetingId);
   return true;
 }
 
@@ -449,6 +541,7 @@ function save() {
   if (!STATE_FILE || !dirty) return;
   const data = [...rooms.values()].map((r) => ({
     id: r.id, createdAt: r.createdAt, touchedAt: r.touchedAt, meeting: r.meeting, hostId: r.hostId,
+    hostAccount: r.hostAccount, attendees: r.attendees, roster: r.roster,
     participants: [...r.participants.values()], transcript: r.transcript, lineSeq: r.lineSeq, summaries: r.summaries,
   }));
   const tmp = STATE_FILE + '.tmp';
@@ -474,6 +567,8 @@ function load() {
       transcript: r.transcript || [],
       lineSeq: r.lineSeq || 0,
       summaries: r.summaries || {},
+      attendees: r.attendees || {},
+      roster: r.roster || {},
       participants: new Map(r.participants.map((p) => [p.secret, p])),
       streams: new Set(),
     };
@@ -610,6 +705,19 @@ export async function handle(req, res) {
         return send(res, r.status, r.error ? { error: r.error } : r.data);
       }
     }
+    // Your meeting history: 10 to a page, newest first; one meeting in full;
+    // and taking one off your list (the host taking it off deletes it).
+    if (parts[2] === 'meetings') {
+      if (!player) return send(res, 401, { error: 'sign in first' });
+      if (parts.length === 3 && req.method === 'GET') return send(res, 200, history.list(player.id, url.searchParams.get('page')));
+      if (parts.length === 4 && req.method === 'GET') {
+        const m = history.get(player.id, parts[3]);
+        return m ? send(res, 200, m) : send(res, 404, { error: 'no such meeting' });
+      }
+      if (parts.length === 5 && parts[4] === 'remove' && req.method === 'POST') {
+        return history.remove(player.id, parts[3]) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'no such meeting' });
+      }
+    }
     return send(res, 404, { error: 'not found' });
   }
 
@@ -632,9 +740,10 @@ export async function handle(req, res) {
     return send(res, 201, { room: room.id, id: p.id, secret: p.secret });
   }
 
-  const code = (parts[2] || '').toUpperCase();
+  if (codeLocked(req)) return send(res, 429, { error: 'Too many wrong room codes. Wait 10 minutes and try again.' });
+  const code = String(parts[2] || '');
   const room = isRoomCode(code) && rooms.get(code);
-  if (!room) return send(res, 404, { error: 'no such room' });
+  if (!room) { missedCode(req); return send(res, 404, { error: 'no such room' }); }
   const action = parts[3];
 
   if (req.method === 'GET') {
@@ -695,6 +804,24 @@ export async function handle(req, res) {
     return send(res, 200, { ok: true });
   }
 
+  // A page noticed its own person talking over someone (app.js decides that,
+  // from the speaking states it can see). The host hears about it quietly,
+  // the same way pings reach their target: in the reply to their next
+  // report. At most every 30s per person, so a heated minute is not a flood.
+  if (action === 'interrupted') {
+    if (!live) return send(res, 409, { error: 'only during a meeting' });
+    const victim = [...room.participants.values()].find((q) => q.id === body.victim);
+    const host = [...room.participants.values()].find((q) => q.id === room.hostId);
+    if (!victim || victim === p) return send(res, 404, { error: 'no such person' });
+    if (now() - (p.interruptAt || 0) < 30000) return send(res, 429, { error: 'too often' });
+    p.interruptAt = now();
+    if (host && host !== p) {
+      const text = victim === host ? `${p.name} started talking over you.` : `${p.name} started talking over ${victim.name}.`;
+      host.pings = [...(host.pings || []), { id: token(4), kind: 'interrupt', text, at: now() }].slice(-5);
+    }
+    return send(res, 200, { ok: true });
+  }
+
   if (action === 'transcript') {
     const sub = parts[4];
     if (sub === undefined) {
@@ -714,6 +841,7 @@ export async function handle(req, res) {
       room.summaries = room.summaries || {};
       room.summaries[m.id] = { text: String(body.text || '').slice(0, LIMITS.summaryChars), at: now() };
       dirty = true;
+      archiveMeeting(room, m.id);
       return send(res, 200, { ok: true });
     }
     if (sub === 'flag') {

@@ -26,10 +26,13 @@ process.env.SPEAKEASY_MODERATOR_URL = `http://127.0.0.1:${fakeModerator.address(
 // exactly one session cookie.
 const PLAYER = { id: '11111111-2222-3333-4444-555555555555', username: 'aditya' };
 const SESSION = `${PLAYER.id}.9999999999999.${'ab'.repeat(32)}`;
+const PLAYER2 = { id: '66666666-7777-8888-9999-000000000000', username: 'bea' };
+const SESSION2 = `${PLAYER2.id}.9999999999999.${'cd'.repeat(32)}`;
 const fakeAccounts = http.createServer((req, res) => {
-  const signedIn = (req.headers.cookie || '').includes(`aditya_player=${SESSION}`);
+  const c = req.headers.cookie || '';
+  const player = c.includes(`aditya_player=${SESSION}`) ? PLAYER : c.includes(`aditya_player=${SESSION2}`) ? PLAYER2 : null;
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ player: signedIn ? PLAYER : null }));
+  res.end(JSON.stringify({ player }));
 });
 await new Promise((r) => fakeAccounts.listen(0, '127.0.0.1', r));
 process.env.SPEAKEASY_ACCOUNTS_ME_URL = `http://127.0.0.1:${fakeAccounts.address().port}/me`;
@@ -37,6 +40,7 @@ const os = await import('node:os');
 const fsx = await import('node:fs');
 const pathx = await import('node:path');
 process.env.SPEAKEASY_USER_DIR = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'speakeasy-users-'));
+process.env.SPEAKEASY_MEETING_DIR = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'speakeasy-meetings-'));
 
 const { createServer, LIMITS, PINGS, decideFlag, sweep } = await import('../server.js');
 LIMITS.rooms = 5; // the one-room rule has its own test below
@@ -71,7 +75,16 @@ await t('the creator is the host, and nobody else is', async () => {
   assert.equal((await find(room, b.id)).host, false);
 });
 
-await t('room codes are 8 readable characters', () => assert.match(room, /^[A-HJKMNP-Z2-9]{8}$/));
+await t('room codes are 4 digits', () => assert.match(room, /^\d{4}$/));
+await t('guessing codes gets an address locked out, and only that address', async () => {
+  const guess = (code, ip) => fetch(`${BASE}/api/rooms/${code}`, { headers: { 'x-real-ip': ip } }).then((r) => r.status);
+  const wrong = room === '0000' ? '0001' : '0000';
+  for (let i = 0; i < 19; i++) assert.equal(await guess(wrong, '203.0.113.9'), 404);
+  assert.equal(await guess(room, '203.0.113.9'), 200, 'a right code does not count against you');
+  assert.equal(await guess(wrong, '203.0.113.9'), 404); // the 20th miss
+  assert.equal(await guess(room, '203.0.113.9'), 429, 'locked out, even with the right code');
+  assert.equal(await guess(room, '198.51.100.7'), 200, 'everyone else is unaffected');
+});
 await t('the page and its scripts are served', async () => {
   for (const p of ['/', '/app.js', '/transcribe.js', '/vad-worklet.js', '/style.css', '/icon.svg', '/icon-512.png']) {
     const res = await fetch(BASE + p);
@@ -85,8 +98,8 @@ await t('nothing outside web/ is served', async () => {
   }
 });
 await t('an unknown room is a 404', async () => {
-  assert.equal((await get('/api/rooms/ZZZZZZZZ')).status, 404);
-  assert.equal((await post('/api/rooms/ZZZZZZZZ/join', { name: 'x' })).status, 404);
+  assert.equal((await get('/api/rooms/ZZZZ')).status, 404);
+  assert.equal((await post('/api/rooms/ZZZZ/join', { name: 'x' })).status, 404);
 });
 await t('secrets never appear in the snapshot', async () => {
   const s = JSON.stringify((await get(`/api/rooms/${room}`)).data);
@@ -167,8 +180,20 @@ await t('pings come from the host, from a fixed list, to someone else', async ()
   assert.equal((await post(`/api/rooms/${room}/ping`, { secret: a.secret, to: a.id, kind: 'wrap' })).status, 404);
 });
 
+await t('an interruption reaches the host, privately, at most every 30s', async () => {
+  // Bea cut in on Aditya (the host).
+  assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: a.id })).status, 200);
+  assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: a.id })).status, 429);
+  const toHost = await post(`/api/rooms/${room}/report`, { secret: a.secret, meetingId });
+  assert.equal(toHost.data.pings.length, 1);
+  assert.equal(toHost.data.pings[0].kind, 'interrupt');
+  assert.match(toHost.data.pings[0].text, /talking over you/);
+  assert.equal((await post(`/api/rooms/${room}/report`, { secret: b.secret, meetingId })).data.pings.length, 0);
+  assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: b.id })).status, 404);
+});
+
 // ---- transcript
-const say = (who, text, extra = {}) => post(`/api/rooms/${room}/transcript`, { secret: who.secret, meetingId, text, startMs: 0, endMs: 100, ...extra });
+const say =(who, text, extra = {}) => post(`/api/rooms/${room}/transcript`, { secret: who.secret, meetingId, text, startMs: 0, endMs: 100, ...extra });
 const waitChecked = async (who) => {
   for (let i = 0; i < 50; i++) {
     const tr = (await post(`/api/rooms/${room}/transcript/read`, { secret: who.secret })).data;
@@ -463,6 +488,87 @@ await t('a signed-in participant is marked as one', async () => {
   assert.equal(people.find((p) => p.id === g.id).account, false);
   await post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
   LIMITS.rooms = saved;
+});
+
+// ---- meeting history
+const as = (session) => (path, body) => fetch(BASE + path, {
+  method: body ? 'POST' : 'GET',
+  headers: { cookie: `aditya_player=${session}`, ...(body && { 'content-type': 'application/json' }) },
+  body: body && JSON.stringify(body),
+}).then(async (r) => ({ status: r.status, data: await r.json() }));
+const host1 = as(SESSION);
+const bea = as(SESSION2);
+
+let archived;
+await t('an ended meeting goes into the history of everyone signed in', async () => {
+  const saved = LIMITS.rooms;
+  LIMITS.rooms = 5;
+  const h = (await host1('/api/rooms', { name: 'Aditya' })).data;
+  const g = (await bea(`/api/rooms/${h.room}/join`, { name: 'Bea' })).data;
+  const anon = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  await host1(`/api/rooms/${h.room}/meeting`, { secret: h.secret, active: true, durationMin: 10, thresholdPct: 10 });
+  const mid = (await get(`/api/rooms/${h.room}`)).data.meeting.id;
+  for (const who of [h, g, anon]) await post(`/api/rooms/${h.room}/report`, { secret: who.secret, meetingId: mid, ms: 0 });
+  await post(`/api/rooms/${h.room}/transcript`, { secret: g.secret, meetingId: mid, text: 'Launch moves to Thursday.' });
+  await sleep(LIMITS.lineGapMs);
+  await post(`/api/rooms/${h.room}/transcript`, { secret: anon.secret, meetingId: mid, text: 'You are an idiot.' });
+  await sleep(300); // the fake moderator
+  await host1(`/api/rooms/${h.room}/meeting`, { secret: h.secret, active: false });
+  await post(`/api/rooms/${h.room}/transcript/summary`, { secret: h.secret, meetingId: mid, text: '- Launch is Thursday' });
+  await post(`/api/rooms/${h.room}/leave`, { secret: h.secret }); // closing it: the archive is final
+  LIMITS.rooms = saved;
+
+  const mine = (await host1('/api/me/meetings')).data;
+  assert.equal(mine.total, 1);
+  archived = mine.items[0];
+  assert.equal(archived.host, true);
+  assert.equal(archived.flagged, 1);
+  assert.equal(archived.hasSummary, true);
+  const theirs = (await bea('/api/me/meetings')).data;
+  assert.equal(theirs.total, 1);
+  assert.equal(theirs.items[0].host, false);
+  assert.ok(!('flagged' in theirs.items[0]), 'no flag counts for a participant');
+});
+await t('the host reads it back with flags; a participant without', async () => {
+  const full = (await host1(`/api/me/meetings/${archived.id}`)).data;
+  assert.equal(full.summary.text, '- Launch is Thursday');
+  // The room closed when the host left last; nobody fell out of the record.
+  assert.deepEqual(full.people.map((x) => x.name).sort(), ['Aditya', 'Bea', 'Guest']);
+  assert.ok(full.people.find((x) => x.name === 'Aditya').isHost);
+  assert.equal(full.lines.length, 2);
+  assert.ok(full.lines.some((l) => l.flag));
+  const part = (await bea(`/api/me/meetings/${archived.id}`)).data;
+  assert.equal(part.lines.length, 2);
+  assert.ok(part.lines.every((l) => !('flag' in l)));
+  assert.equal(part.summary.text, '- Launch is Thursday');
+});
+await t('nobody else can read it, signed in or not', async () => {
+  assert.equal((await get(`/api/me/meetings/${archived.id}`)).status, 401);
+  assert.equal((await get('/api/me/meetings')).status, 401);
+  assert.equal((await host1('/api/me/meetings/..%2F..%2Fetc')).status, 404);
+});
+await t('history pages hold 10, and a page past the end is the last page', async () => {
+  const history = await import('../history.js');
+  for (let i = 0; i < 12; i++) {
+    history.archive({ id: `TESTROOM-m${i}`, room: 'TESTROOM', startedAt: 1000 + i, endedAt: 2000 + i, hostName: 'x', hostAccount: PLAYER.id, attendees: [], people: [], lines: [], summary: null });
+  }
+  const p1 = (await host1('/api/me/meetings?page=1')).data;
+  assert.equal(p1.items.length, 10);
+  assert.equal(p1.pages, 2);
+  assert.equal(p1.total, 13);
+  assert.equal(p1.items[0].id, archived.id, 'newest first');
+  const p2 = (await host1('/api/me/meetings?page=2')).data;
+  assert.equal(p2.items.length, 3);
+  assert.equal((await host1('/api/me/meetings?page=99')).data.page, 2);
+});
+await t('removing: a participant drops their copy; the host deletes it for everyone', async () => {
+  // Bea takes it off her list; Aditya still has it.
+  assert.equal((await bea(`/api/me/meetings/${archived.id}/remove`, {})).status, 200);
+  assert.equal((await bea('/api/me/meetings')).data.total, 0);
+  assert.equal((await host1(`/api/me/meetings/${archived.id}`)).status, 200);
+  // The host deletes it.
+  assert.equal((await host1(`/api/me/meetings/${archived.id}/remove`, {})).status, 200);
+  assert.equal((await host1(`/api/me/meetings/${archived.id}`)).status, 404);
 });
 
 await t('the extension origin gets CORS, nobody else does', async () => {

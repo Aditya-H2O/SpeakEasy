@@ -52,7 +52,7 @@
           </p>
           <div class="or"><span>or join one</span></div>
           <form id="join-form" class="join-row">
-            <input id="code" maxlength="8" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" aria-label="Room code" />
+            <input id="code" maxlength="4" inputmode="numeric" pattern="[0-9]{4}" placeholder="4-digit code" autocomplete="off" spellcheck="false" aria-label="Room code" />
             <button class="btn">Join</button>
           </form>
         </div>
@@ -102,6 +102,53 @@
         </section>
         <div id="notes-slot-lobby"></div>
       </div>
+
+      <!-- Meeting history: ten to a page, Newer/Older, not an endless scroll. -->
+      <section id="history" class="card history" hidden>
+        <div class="card-head">
+          <h2>Meeting history</h2>
+          <span id="history-count" class="muted small-note"></span>
+        </div>
+        <p id="history-signedout" class="muted empty">
+          Sign in to keep a history of your meetings: the transcript, the summary and who talked how much.
+        </p>
+        <div id="history-browse" hidden>
+          <p id="history-empty" class="muted empty" hidden></p>
+          <ol id="history-list" class="history-list"></ol>
+          <nav id="history-pager" class="pager" aria-label="Meeting history pages" hidden>
+            <button id="history-newer" class="btn small ghost">← Newer</button>
+            <span id="history-page" class="muted small-note"></span>
+            <button id="history-older" class="btn small ghost">Older →</button>
+          </nav>
+        </div>
+        <div id="history-view" class="history-view" hidden>
+          <div class="hv-head">
+            <button id="hv-back" class="btn small ghost">← All meetings</button>
+            <div class="head-actions">
+              <button id="hv-download" class="btn small ghost">Download .txt</button>
+              <button id="hv-remove" class="btn small ghost">Remove</button>
+            </div>
+          </div>
+          <h3 id="hv-title"></h3>
+          <p id="hv-meta" class="muted small-note"></p>
+          <div id="hv-summary-wrap" class="summary-box">
+            <strong>AI summary</strong>
+            <div id="hv-summary" class="summary-text"></div>
+          </div>
+          <div class="hv-grid">
+            <div>
+              <h4>Talk time</h4>
+              <ol id="hv-people" class="hv-people"></ol>
+            </div>
+            <div>
+              <h4>Transcript</h4>
+              <p id="hv-flags" class="flag-summary"></p>
+              <ol id="hv-lines" class="transcript-list hv-lines"></ol>
+              <p id="hv-empty" class="muted empty">Nothing was transcribed in this meeting.</p>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- Room -->
@@ -123,8 +170,9 @@
            gets to read it. -->
       <p class="consent">
         <b>This meeting is transcribed.</b> What each person says is written down and checked by an AI
-        model for out-of-pocket remarks. Everyone sees the transcript; only the host sees what was
-        flagged and can download it. It is deleted when the host closes the room.
+        model for out-of-pocket remarks. Everyone sees the transcript as it happens; only the host sees
+        what was flagged. Afterwards the transcript and summary are kept in the host's meeting history,
+        and in yours too if you're signed in. Untick "Transcribe me" to be left out.
       </p>
 
       <section class="card meeting">
@@ -178,7 +226,8 @@
               <small class="muted">Further right = needs to be louder. Raise it if other people's voices count as yours.</small>
             </label>
             <p class="muted small-note">
-              <b>Wear headphones.</b> If the call plays through your speakers, your mic hears the others too.
+              <b>Only a voice counts.</b> Claps, typing, bangs and applause are ignored: SpeakEasy listens for the steady pitch of speech.
+              <b>Wear headphones.</b> If the call plays through your speakers, your mic hears the others too, and a voice is a voice.
               Speech-to-text is Chrome's: on-device where Chrome can, otherwise Chrome sends your audio to
               Google to transcribe. SpeakEasy itself only receives the text.
             </p>
@@ -268,6 +317,7 @@
     <script src="transcribe.js"></script>
     <script src="personal.js"></script>
     <script src="summarize.js"></script>
+    <script src="meetings.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
