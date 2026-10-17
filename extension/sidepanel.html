@@ -19,16 +19,20 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <header class="top">
-      <a class="brand" href="sidepanel.html">Speak<span>Easy</span></a>
-      <div class="top-right">
-        <span id="account-chip" class="account-chip" hidden>
-          <span class="muted">Signed in as</span> <b id="account-name"></b>
-          <button id="signout" class="link-btn">Sign out</button>
-        </span>
-        <a class="home" href="https://aditya-h.com/" target="_blank" rel="noopener">aditya-h.com</a>
-      </div>
-    </header>
+    <!-- Sticky: the logo and the account button stay in reach while you scroll. -->
+    <div class="topbar">
+      <header class="top">
+        <a class="brand" href="sidepanel.html">Speak<span>Easy</span></a>
+        <div class="top-right">
+          <a class="home" href="https://aditya-h.com/" target="_blank" rel="noopener">aditya-h.com</a>
+          <span id="account-chip" class="account-chip" hidden>
+            <span class="muted">Signed in as</span> <b id="account-name"></b>
+            <button id="signout" class="link-btn">Sign out</button>
+          </span>
+          <button id="signin-open" class="btn small primary" hidden>Sign in</button>
+        </div>
+      </header>
+    </div>
 
     <!-- Lobby: no room in the URL yet. -->
     <main id="lobby" class="wrap" hidden>
@@ -66,33 +70,10 @@
         <div><b>3.</b> Afterwards the host gets the transcript, with anything out of pocket flagged.</div>
       </section>
 
-      <!-- aditya-h.com's own visitor accounts: the same sign-in as Grounds
-           Guessr and VS. Optional: anyone can still join a meeting without. -->
-      <section id="signin-card" class="card signin-card" hidden>
-        <div class="card-head">
-          <h2 id="signin-title">Sign in</h2>
-          <span class="muted small-note">Optional</span>
-        </div>
-        <p class="muted small-note">
-          With an aditya-h.com account your notes and scheduled meetings are saved to it, so they follow you
-          to any device and into the extension. It's the same account as Grounds Guessr and VS.
-        </p>
-        <form id="signin-form" class="signin-form">
-          <input id="signin-user" autocomplete="username" placeholder="Username" aria-label="Username" required maxlength="40" />
-          <input id="signin-pass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required />
-          <input id="signin-invite" autocomplete="off" placeholder="Invite code" aria-label="Invite code" hidden />
-          <button id="signin-go" class="btn">Sign in</button>
-        </form>
-        <p class="small-note">
-          <button id="signin-toggle" type="button" class="link-btn">I have an invite code (make an account)</button>
-        </p>
-        <p id="signin-error" class="error" role="alert"></p>
-      </section>
-
       <div class="prep">
         <section class="card">
           <div class="card-head">
-            <h2>Your meetings</h2>
+            <h2>To Do List</h2>
             <div class="head-actions">
               <button id="plan-import" class="btn small ghost" title="A .txt file, one to-do per line">Import to-do .txt</button>
               <button id="plan-new" class="btn small">Schedule a meeting</button>
@@ -314,6 +295,31 @@
       <textarea id="notes" rows="8" placeholder="Notes you keep from meeting to meeting. Only you see them." aria-label="Your notes"></textarea>
       <p id="notes-saved" class="muted small-note">Saved on this device</p>
     </section>
+
+    <!-- Sign in: aditya-h.com's own visitor accounts, the same as Grounds
+         Guessr and VS. A real modal <dialog>: showModal() traps focus and dims
+         the page; Esc, the Close button or a click outside (closedby="any")
+         dismisses it. Optional: anyone can still join a meeting without. -->
+    <dialog id="signin-dialog" class="signin-dialog" closedby="any" aria-labelledby="signin-title">
+      <div class="card-head">
+        <h2 id="signin-title">Sign in</h2>
+        <form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form>
+      </div>
+      <p class="muted small-note">
+        With an aditya-h.com account your notes, to-do lists and meeting history are saved to it, so they
+        follow you to any device and into the extension. It's the same account as Grounds Guessr and VS.
+      </p>
+      <form id="signin-form" class="signin-form">
+        <input id="signin-user" autocomplete="username" placeholder="Username" aria-label="Username" required maxlength="40" autofocus />
+        <input id="signin-pass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required />
+        <input id="signin-invite" autocomplete="off" placeholder="Invite code" aria-label="Invite code" hidden />
+        <button id="signin-go" class="btn primary">Sign in</button>
+      </form>
+      <p class="small-note">
+        <button id="signin-toggle" type="button" class="link-btn">I have an invite code (make an account)</button>
+      </p>
+      <p id="signin-error" class="error" role="alert"></p>
+    </dialog>
 
     <!-- Nudges and pings land here. Each one can be closed. -->
     <div id="toasts" class="toasts" aria-live="assertive"></div>

@@ -313,8 +313,6 @@ body[data-view="room"] .top { max-width: 1200px; }
 /* account */
 .top-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
 .account-chip { font-size: 0.85rem; display: inline-flex; gap: 6px; align-items: baseline; }
-.signin-card { max-width: 440px; margin-top: 16px; display: grid; gap: 10px; }
-.signin-card .card-head { margin-bottom: 0; }
 .signin-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .signin-form .btn, .signin-form #signin-invite { grid-column: 1 / -1; }
 @media (max-width: 420px) { .signin-form { grid-template-columns: 1fr; } }
@@ -362,3 +360,25 @@ input[type="password"] { font: inherit; width: 100%; padding: 10px 12px; border-
 .dot.paused { background: #d6a01e; }
 .person.mic-dead .person-name { color: var(--warn); }
 .person.mic-dead .person-name .tag { color: var(--warn); font-weight: 600; }
+
+/* Sticky header: the logo and Sign in stay at the top as you scroll. */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+.topbar .top { padding-block: 12px; }
+.room-grid .transcript { top: 76px; max-height: calc(100vh - 92px); }
+#history, #room { scroll-margin-top: 76px; }
+
+/* The sign-in window. */
+.signin-dialog {
+  width: min(420px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--line); border-radius: 16px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
+}
+.signin-dialog[open] { display: grid; gap: 10px; animation: rise 0.2s ease; }
+.signin-dialog::backdrop { background: rgb(0 0 0 / 0.45); backdrop-filter: blur(2px); }
+.signin-dialog .card-head { margin-bottom: 0; }
+.signin-dialog .card-head form { margin: 0; }
+@media (prefers-reduced-motion: reduce) { .signin-dialog[open] { animation: none; } }

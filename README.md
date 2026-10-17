@@ -68,7 +68,7 @@ the transcript in its own scrolling pane; one column on narrow screens):
 
 **Accounts.** SpeakEasy uses aditya-h.com's existing visitor accounts, the same
 sign-in as Grounds Guessr and VS. Making one needs the site's invite code. Sign
-in from the lobby; it is optional, and anyone can join a meeting without one.
+in with the **Sign in** button in the header (it opens a window); it is optional, and anyone can join a meeting without one.
 Signed-in people get a ✓ in the room. SpeakEasy never sees your password hash
 or holds the site's session key: it asks Grounds Guessr, over loopback, who your
 session cookie belongs to.

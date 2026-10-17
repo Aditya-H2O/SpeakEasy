@@ -123,11 +123,17 @@
     S.player = player;
     $('account-chip').hidden = !player;
     if (player) $('account-name').textContent = player.username;
-    $('signin-card').hidden = !!player || !(ok && r.data.accounts);
+    $('signin-open').hidden = !!player || !(ok && r.data.accounts);
+    if (player && $('signin-dialog').open) $('signin-dialog').close();
     if (player && !$('name').value) $('name').value = player.username;
     window.SpeakEasyHistory.setAccount(player);
     await Personal.setAccount(player);
   }
+
+  $('signin-open').addEventListener('click', () => {
+    $('signin-error').textContent = '';
+    $('signin-dialog').showModal();
+  });
 
   let registering = false;
   $('signin-toggle').addEventListener('click', () => {
