@@ -193,7 +193,8 @@
 
   function connect() {
     if (S.events) S.events.close();
-    const es = new EventSource(`${API}rooms/${S.code}/events`, { withCredentials: REMOTE });
+    // ?p= is our PUBLIC id, so the server knows this page is still open.
+    const es = new EventSource(`${API}rooms/${S.code}/events?p=${encodeURIComponent(S.me.id)}`, { withCredentials: REMOTE });
     S.events = es;
     es.onopen = () => loadTranscript();
     es.onmessage = (e) => {
@@ -250,7 +251,7 @@
   const myMs = () => S.baseMs + S.vad.speakingMs;
 
   async function report(force) {
-    if (!S.me || S.reporting) return;
+    if (!S.me || S.reporting || S.unloading) return;
     const t = Date.now();
     const speaking = counting() && S.vad.speaking;
     const flipped = speaking !== S.lastSpeaking;
@@ -341,17 +342,19 @@
     else prompt('Copy this, then paste it in Discord:', msg);
   });
 
-  // For the host this button is "Close meeting", and it sends everyone out and
-  // deletes the transcript, so it takes a second click to be sure. A second
-  // click rather than confirm(): a dialog is not something to rely on in the
-  // extension's side panel.
+  // Leaving takes a second click, for everyone. For the host the button is
+  // "Close meeting", and it sends everyone out and deletes the transcript. A
+  // second click rather than confirm(): a dialog is not something to rely on
+  // in the extension's side panel.
   let armedUntil = 0;
-  const leaveLabel = () => (amHost()
-    ? (Date.now() < armedUntil ? 'Click again: closes the room and deletes the transcript' : 'Close meeting')
-    : 'Leave');
+  const leaveLabel = () => {
+    const armed = Date.now() < armedUntil;
+    if (amHost()) return armed ? 'Click again: closes the room and deletes the transcript' : 'Close meeting';
+    return armed ? 'Click again to leave' : 'Leave';
+  };
 
   $('leave').addEventListener('click', async () => {
-    if (amHost() && Date.now() >= armedUntil) {
+    if (Date.now() >= armedUntil) {
       armedUntil = Date.now() + 4000;
       $('leave').textContent = leaveLabel();
       $('leave').classList.add('danger');
@@ -368,6 +371,38 @@
     S.snap = null;
     history.replaceState(null, '', location.pathname);
     initLobby('');
+  });
+
+  // Closing the tab while in a room: ask first. Browsers show their own
+  // generic "Leave site?" wording; a page cannot choose the text.
+  window.addEventListener('beforeunload', (e) => {
+    if (!S.me) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  // And if they go anyway, say goodbye on the way out, so a closed tab does
+  // not leave the room (and, for a host, the one meeting slot) occupied.
+  // `soon` because a reload looks exactly like this and then comes straight
+  // back: the server waits 15 seconds, and a returning page cancels it.
+  // keepalive lets the request outlive the page; it works from the extension
+  // too, where sendBeacon's cross-origin rules would not.
+  window.addEventListener('pagehide', () => {
+    if (!S.me) return;
+    S.unloading = true;
+    try {
+      fetch(`${API}rooms/${S.code}/leave`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ secret: S.me.secret, soon: true }),
+        keepalive: true,
+        credentials: REMOTE ? 'include' : 'same-origin',
+      });
+    } catch {}
+  });
+  // Back from the back/forward cache: we are here after all.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted && S.me) { S.unloading = false; report(true); }
   });
 
   // ------------------------------------------------------- toasts, nudges --

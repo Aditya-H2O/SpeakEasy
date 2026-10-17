@@ -22,7 +22,7 @@ const fakeModerator = http.createServer((req, res) => {
 await new Promise((r) => fakeModerator.listen(0, '127.0.0.1', r));
 process.env.SPEAKEASY_MODERATOR_URL = `http://127.0.0.1:${fakeModerator.address().port}`;
 
-const { createServer, LIMITS, PINGS, decideFlag } = await import('../server.js');
+const { createServer, LIMITS, PINGS, decideFlag, sweep } = await import('../server.js');
 LIMITS.rooms = 5; // the one-room rule has its own test below
 
 const server = createServer();
@@ -301,6 +301,57 @@ await t('the host leaving closes the room for everyone still in it', async () =>
   assert.match(buf, /event: closed\ndata: \{"reason":"host"\}/);
   assert.equal((await get(`/api/rooms/${h.room}`)).status, 404);
   assert.equal((await post(`/api/rooms/${h.room}/report`, { secret: c.secret })).status, 404);
+});
+
+await t('a closed tab leaves after the grace period; the host closing one closes the room', async () => {
+  LIMITS.leaveGraceMs = 200;
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  assert.equal((await post(`/api/rooms/${h.room}/leave`, { secret: g.secret, soon: true })).status, 202);
+  assert.ok(await find(h.room, g.id), 'still there during the grace period');
+  await sleep(350);
+  assert.equal(await find(h.room, g.id), undefined, 'gone after it');
+  await post(`/api/rooms/${h.room}/leave`, { secret: h.secret, soon: true });
+  await sleep(350);
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 404);
+});
+await t('a reload cancels its own goodbye', async () => {
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  await post(`/api/rooms/${h.room}/leave`, { secret: h.secret, soon: true });
+  await sleep(50);
+  // The reloaded page reopens its stream (with its public id) and reports.
+  const ctl = new AbortController();
+  await fetch(`${BASE}/api/rooms/${h.room}/events?p=${h.id}`, { signal: ctl.signal });
+  await post(`/api/rooms/${h.room}/report`, { secret: h.secret });
+  await sleep(350);
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 200);
+  ctl.abort();
+  await post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
+});
+await t('a host whose page vanished without a word closes the room', async () => {
+  const saved = LIMITS.hostGoneMs;
+  LIMITS.hostGoneMs = 100;
+  // The main test room's host has no page open either; keep theirs open, or
+  // the sweep below would (rightly) close that room too.
+  const keep = new AbortController();
+  await fetch(`${BASE}/api/rooms/${room}/events?p=${a.id}`, { signal: keep.signal });
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  // The host's page is open: its stream keeps the room alive however quiet.
+  const ctl = new AbortController();
+  await fetch(`${BASE}/api/rooms/${h.room}/events?p=${h.id}`, { signal: ctl.signal });
+  await sleep(200);
+  sweep();
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 200);
+  // A guest staying put does not keep it alive once the host's page is gone.
+  ctl.abort();
+  await sleep(200);
+  await post(`/api/rooms/${h.room}/report`, { secret: g.secret });
+  sweep();
+  assert.equal((await get(`/api/rooms/${h.room}`)).status, 404);
+  assert.equal((await get(`/api/rooms/${room}`)).status, 200, 'a room whose host is still here stays');
+  LIMITS.hostGoneMs = saved;
+  keep.abort();
 });
 
 await t('only one meeting at a time', async () => {

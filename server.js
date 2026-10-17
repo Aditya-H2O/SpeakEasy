@@ -46,6 +46,8 @@ export const LIMITS = {
   sseClientsPerRoom: 48,
   roomIdleMs: 12 * 60 * 60 * 1000, // a room nobody has touched in 12h is gone
   participantGoneMs: 10 * 60 * 1000, // silent this long and not in the results: dropped
+  leaveGraceMs: 15000, // a closed tab leaves after this, unless it was a reload and came back
+  hostGoneMs: 60000, // host with no open page and no report this long: the room closes
   awayMs: 8000, // no report this long: shown as away
   reportSlackMs: 1500, // tolerance on "you cannot speak for longer than time passed"
   lineChars: 600, // one finished utterance; longer is cut
@@ -183,11 +185,27 @@ const abandoned = (room, t) =>
   [...room.participants.values()].every((p) => t - p.seenAt > LIMITS.participantGoneMs) &&
   t - room.createdAt > LIMITS.participantGoneMs;
 
-function sweep() {
+// The host's page is gone without a word: a crash, a lid closed, a tab whose
+// goodbye never arrived. Their open event stream is the tell -- a background
+// tab can go a minute between reports, but its stream stays open -- so: no
+// stream of theirs, and nothing from them for hostGoneMs.
+function hostGone(room, t) {
+  if (!room.hostId) return false;
+  const host = [...room.participants.values()].find((p) => p.id === room.hostId);
+  if (!host) return true;
+  const watching = [...room.streams].some((s) => s.pid === host.id);
+  return !watching && t - host.seenAt > LIMITS.hostGoneMs;
+}
+
+export function sweep() {
   const t = now();
   for (const room of rooms.values()) {
     if (t - room.touchedAt > LIMITS.roomIdleMs || abandoned(room, t)) {
       closeRoom(room, 'abandoned');
+      continue;
+    }
+    if (hostGone(room, t)) {
+      closeRoom(room, 'host');
       continue;
     }
     for (const [secret, p] of room.participants) {
@@ -201,6 +219,29 @@ function sweep() {
 }
 
 // ---- the actions ----------------------------------------------------------
+
+// Out of the room, now. The host leaving closes it for everyone, and so does
+// the last one out: no lingering results, no code that still works tomorrow.
+export function leave(room, p) {
+  room.participants.delete(p.secret);
+  const reason = p.id === room.hostId ? 'host' : room.participants.size === 0 ? 'empty' : null;
+  if (reason) closeRoom(room, reason);
+  else changed(room);
+  return reason;
+}
+
+// A tab that is closing says goodbye on its way out, but a RELOAD says the
+// same goodbye and then comes straight back. So a goodbye starts a grace
+// period instead; any sign of life from that participant (a report, or their
+// page reopening its event stream) cancels it.
+export function leaveSoon(room, p) {
+  const at = now();
+  p.leavingAt = at;
+  setTimeout(() => {
+    if (rooms.get(room.id) !== room || !room.participants.has(p.secret)) return;
+    if (p.leavingAt === at) leave(room, p);
+  }, LIMITS.leaveGraceMs).unref?.();
+}
 
 export function join(room, name, asHost = false) {
   if (room.participants.size >= LIMITS.participantsPerRoom) return null;
@@ -229,6 +270,7 @@ export function join(room, name, asHost = false) {
 export function report(room, p, body) {
   const t = now();
   p.seenAt = t;
+  p.leavingAt = null; // a reload that came back: not leaving after all
   p.speaking = !!body.speaking;
   p.micOn = !!body.micOn;
   p.transcribing = !!body.transcribing;
@@ -485,7 +527,10 @@ function serveStatic(res, urlPath) {
   });
 }
 
-function openStream(req, res, room) {
+// `?p=` is the viewer's PUBLIC participant id (it is in every snapshot anyway),
+// so the server can tell whose page a stream is. That is how a host whose
+// tab vanished is noticed, and how a reloaded page cancels its own goodbye.
+function openStream(req, res, room, pid) {
   if (room.streams.size >= LIMITS.sseClientsPerRoom) return send(res, 429, { error: 'room is full' });
   res.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -493,6 +538,8 @@ function openStream(req, res, room) {
     'x-accel-buffering': 'no', // nginx: pass each event through as it is written
   });
   res.write(`retry: 2000\ndata: ${JSON.stringify(snapshot(room))}\n\n`);
+  const p = pid && [...room.participants.values()].find((q) => q.id === pid);
+  if (p) { res.pid = p.id; p.seenAt = now(); p.leavingAt = null; }
   room.streams.add(res);
   req.on('close', () => room.streams.delete(res));
 }
@@ -564,7 +611,7 @@ export async function handle(req, res) {
   const action = parts[3];
 
   if (req.method === 'GET') {
-    if (action === 'events' && parts.length === 4) return openStream(req, res, room);
+    if (action === 'events' && parts.length === 4) return openStream(req, res, room, url.searchParams.get('p'));
     if (action === undefined) return send(res, 200, snapshot(room));
     return send(res, 404, { error: 'not found' });
   }
@@ -637,13 +684,9 @@ export async function handle(req, res) {
     return send(res, 404, { error: 'not found' });
   }
   if (action === 'leave') {
-    room.participants.delete(p.secret);
-    // The host leaving closes the room for everyone, and so does the last one
-    // out: no lingering results, no code that still works tomorrow.
-    const reason = p.id === room.hostId ? 'host' : room.participants.size === 0 ? 'empty' : null;
-    if (reason) closeRoom(room, reason);
-    else changed(room);
-    return send(res, 200, { ok: true, closed: !!reason });
+    // `soon`: sent by a page as it unloads. It may be a reload, so wait.
+    if (body.soon) { leaveSoon(room, p); return send(res, 202, { ok: true, pending: true }); }
+    return send(res, 200, { ok: true, closed: !!leave(room, p) });
   }
   return send(res, 404, { error: 'not found' });
 }
@@ -668,7 +711,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     for (const room of rooms.values()) for (const res of room.streams) res.write(': keepalive\n\n');
   }, 20000).unref();
   setInterval(() => { for (const room of rooms.values()) if (room.streams.size) broadcast(room); }, 4000).unref();
-  setInterval(() => sweep(), 60000).unref();
+  setInterval(() => sweep(), 15000).unref(); // often enough for hostGoneMs to bite within ~75s
   setInterval(save, 15000).unref();
 
   const stop = () => { save(); process.exit(0); };
