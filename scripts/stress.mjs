@@ -105,7 +105,7 @@ check('no secret, no write', (await api('POST', `rooms/${code}/report`, { secret
 const big = await api('POST', `rooms/${code}/report`, JSON.stringify({ secret: host.secret, junk: 'x'.repeat(40000) }));
 check('a 40KB body is stopped by nginx', big.status === 413, `got ${big.status}`);
 const mid = await api('POST', `rooms/${code}/report`, JSON.stringify({ secret: host.secret, junk: 'x'.repeat(8000) }));
-check('an 8KB body is stopped by the app', mid.status === 400, `got ${mid.status}`);
+check('an 8KB body is refused cleanly by the app', mid.status === 413, `got ${mid.status}`);
 check('broken JSON is a 400, not a crash', (await api('POST', `rooms/${code}/report`, '{nope')).status === 400);
 check('path tricks are refused', [ (await request('GET', '/speakeasy/../gate/.env')).status, (await request('GET', '/speakeasy/%2e%2e/server.js')).status ].every((s) => s === 400 || s === 404), 'dot segments');
 check('server source is not served', (await request('GET', '/speakeasy/server.js')).status === 404);
@@ -152,7 +152,7 @@ await Promise.all(people.map(async (p, i) => {
       const pr = await api('POST', `rooms/${code}/ping`, { secret: host.secret, to: target.id, kind: 'share' });
       lat.ping.push(pr.ms); count('ping', pr.status);
     }
-    await sleep(900 + Math.random() * 200);
+    await sleep(1900 + Math.random() * 200); // pages report every 2s
   }
 }));
 const loadSecs = (Date.now() - t0) / 1000;

@@ -198,7 +198,10 @@
           </label>
           <button id="start" class="btn primary big">Start meeting</button>
         </form>
-        <button id="stop" class="btn stop big" hidden>End meeting</button>
+        <div class="meeting-actions">
+          <button id="pause" class="btn big" hidden>Pause</button>
+          <button id="stop" class="btn stop big" hidden>End meeting</button>
+        </div>
         <p id="waiting" class="muted" hidden>Waiting for the host to start the meeting.</p>
         <p id="meeting-error" class="error" role="alert"></p>
       </section>

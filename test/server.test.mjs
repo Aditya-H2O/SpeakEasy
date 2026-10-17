@@ -111,7 +111,7 @@ await t('a write without your secret is refused', async () => {
 });
 await t('a body over the cap is refused', async () => {
   const res = await fetch(`${BASE}/api/rooms/${room}/report`, { method: 'POST', body: 'x'.repeat(LIMITS.bodyBytes + 10) }).catch(() => null);
-  assert.ok(!res || res.status === 400);
+  assert.ok(!res || res.status === 413, `got ${res && res.status}`);
 });
 
 await t('talk time does not count before the meeting starts', async () => {
@@ -159,6 +159,33 @@ await t('a report for a stale meeting is ignored', async () => {
 await t('names are kept as text, trimmed and capped', async () => {
   await post(`/api/rooms/${room}/report`, { secret: b.secret, name: '  ' + 'y'.repeat(100) + '\u0007', meetingId });
   assert.equal((await find(room, b.id)).name, 'y'.repeat(LIMITS.nameLength));
+});
+
+await t('the host sees whose mic is not reaching the page', async () => {
+  await post(`/api/rooms/${room}/report`, { secret: a.secret, meetingId, micOn: true, micLive: true });
+  await post(`/api/rooms/${room}/report`, { secret: b.secret, meetingId, micOn: true, micLive: false });
+  assert.equal((await find(room, a.id)).micLive, true);
+  assert.equal((await find(room, b.id)).micLive, false);
+});
+
+await t('a paused meeting counts nothing and takes no lines; resuming carries on', async () => {
+  assert.equal((await post(`/api/rooms/${room}/pause`, { secret: b.secret, paused: true })).status, 403);
+  const before = (await find(room, a.id)).ms;
+  assert.equal((await post(`/api/rooms/${room}/pause`, { secret: a.secret, paused: true })).status, 200);
+  const snap = (await get(`/api/rooms/${room}`)).data;
+  assert.ok(snap.meeting.pausedAt);
+  await sleep(400);
+  await post(`/api/rooms/${room}/report`, { secret: a.secret, speaking: true, meetingId, ms: before + 5000 });
+  assert.equal((await find(room, a.id)).ms, before, 'no talk time while paused');
+  await sleep(LIMITS.lineGapMs);
+  assert.equal((await post(`/api/rooms/${room}/transcript`, { secret: b.secret, meetingId, text: 'during the break' })).status, 409);
+  assert.equal((await post(`/api/rooms/${room}/pause`, { secret: a.secret, paused: false })).status, 200);
+  const resumed = (await get(`/api/rooms/${room}`)).data.meeting;
+  assert.equal(resumed.pausedAt, null);
+  assert.ok(resumed.pausedMs >= 400, `paused for ${resumed.pausedMs}ms`);
+  // The break is not time anyone could have spent talking.
+  await post(`/api/rooms/${room}/report`, { secret: a.secret, speaking: true, meetingId, ms: before + 5000 });
+  assert.ok((await find(room, a.id)).ms - before <= LIMITS.reportSlackMs + 200);
 });
 
 // ---- pings

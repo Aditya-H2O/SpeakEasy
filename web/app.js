@@ -91,6 +91,12 @@
 
   const serverNow = () => Date.now() + S.clockOffset;
   const liveMeeting = () => S.snap && S.snap.meeting && !S.snap.meeting.endedAt ? S.snap.meeting : null;
+  const isPaused = () => !!(liveMeeting() && liveMeeting().pausedAt);
+  // Running time, not wall time: breaks do not count (server.js activeMs).
+  const activeMs = (m) => {
+    const end = m.endedAt || serverNow();
+    return end - m.startedAt - (m.pausedMs || 0) - (m.pausedAt ? end - m.pausedAt : 0);
+  };
   const meParticipant = () => S.snap && S.me && S.snap.participants.find((p) => p.id === S.me.id);
   const amHost = () => !!(meParticipant() || {}).host;
 
@@ -317,10 +323,11 @@
       S.pingOpen = null;
       post({ reset: true, counting: counting() });
     }
+    post({ counting: counting() }); // a pause or a resume changes this without a new meeting
     syncTranscriber();
   }
 
-  const counting = () => !!(liveMeeting() && S.audio && !S.paused);
+  const counting = () => !!(liveMeeting() && !isPaused() && S.audio && !S.paused);
   const post = (msg) => { if (S.audio) S.audio.node.port.postMessage(msg); };
   const myMs = () => S.baseMs + S.vad.speakingMs;
 
@@ -329,9 +336,12 @@
     const t = Date.now();
     const speaking = counting() && S.vad.speaking;
     const flipped = speaking !== S.lastSpeaking;
-    // Once a second, and straight away when the speaking state flips -- but
-    // never more than four times a second, however chatty the flips are.
-    if (!force && !(t - S.lastReport >= 1000 || (flipped && t - S.lastReport >= 250))) return;
+    // Every two seconds, and straight away when the speaking state flips --
+    // but never more than twice a second, however chatty the flips are. Two
+    // seconds, not one, because every request through the site also costs a
+    // Gate check: a full meeting reporting every second was enough to fill
+    // the droplet's connection-tracking table (see README, "Stress test").
+    if (!force && !(t - S.lastReport >= 2000 || (flipped && t - S.lastReport >= 500))) return;
     S.lastReport = t;
     S.lastSpeaking = speaking;
     S.reporting = true;
@@ -340,6 +350,7 @@
         secret: S.me.secret,
         speaking,
         micOn: !!S.audio && !S.paused,
+        micLive: micHealth() === 'ok', // the host sees our name in red when not
         transcribing: ['on-device', 'cloud'].includes(S.sttState),
         meetingId: S.meetingId,
         ms: Math.round(myMs()),
@@ -398,6 +409,15 @@
     } else if (summarizer) {
       summarizer.then((s) => s.destroy && s.destroy(), () => {});
     }
+  });
+
+  // A break in the middle of a meeting: talk time, transcription, the clock
+  // and the halfway nudge all stop until the host resumes.
+  $('pause').addEventListener('click', async () => {
+    $('pause').disabled = true;
+    const r = await api(`rooms/${S.code}/pause`, { secret: S.me.secret, paused: !isPaused() });
+    $('pause').disabled = false;
+    $('meeting-error').textContent = r.ok ? '' : (r.data && r.data.error) || 'Could not pause the meeting.';
   });
 
   // ------------------------------------------------------------ AI summary --
@@ -607,7 +627,7 @@
   function checkNudge() {
     const m = liveMeeting();
     if (!m || !m.plannedMs || S.nudged === m.id || !S.me) return;
-    if (serverNow() - m.startedAt < m.plannedMs / 2) return;
+    if (m.pausedAt || activeMs(m) < m.plannedMs / 2) return;
     const people = S.snap.participants;
     if (people.length < 2) return;
     const total = people.reduce((a, p) => a + p.ms, 0);
@@ -881,7 +901,7 @@
   // Transcribe exactly while: a meeting is on, the mic is on, we are not
   // muted, and the person has not opted out.
   function syncTranscriber() {
-    const want = !!(liveMeeting() && S.audio && !S.paused && $('transcribe-me').checked);
+    const want = !!(liveMeeting() && !isPaused() && S.audio && !S.paused && $('transcribe-me').checked);
     if (!Transcriber.supported) {
       $('stt-state').textContent = want ? 'This browser cannot transcribe; use Chrome.' : '';
       return;
@@ -901,7 +921,7 @@
 
   async function sendLine({ text, startAt, endAt }) {
     const m = liveMeeting();
-    if (!m || !S.me) return;
+    if (!m || !S.me || m.pausedAt) return;
     noteFillers(text);
     const body = {
       secret: S.me.secret,
@@ -1056,8 +1076,13 @@
     const live = liveMeeting();
     const host = amHost();
 
-    $('meeting-dot').classList.toggle('on', !!live);
-    $('meeting-label').textContent = live ? 'Meeting in progress' : m ? 'Meeting ended' : 'No meeting yet';
+    const paused = isPaused();
+    $('meeting-dot').classList.toggle('on', !!live && !paused);
+    $('meeting-dot').classList.toggle('paused', paused);
+    $('meeting-label').textContent = paused ? 'Paused for a break' : live ? 'Meeting in progress' : m ? 'Meeting ended' : 'No meeting yet';
+    $('pause').hidden = !host || !live;
+    $('pause').textContent = paused ? 'Resume meeting' : 'Pause';
+    $('pause').classList.toggle('primary', paused);
     $('meeting-plan').textContent = m && m.plannedMs
       ? `Planned ${Math.round(m.plannedMs / 60000)} min · speak-up nudge under ${m.thresholdPct}% at the halfway mark`
       : '';
@@ -1087,7 +1112,11 @@
         const share = total ? p.ms / total : 0;
         const li = document.createElement('li');
         li.className = 'person' + (p.id === S.me.id ? ' me' : '') + (p.speaking ? ' speaking' : '');
-        const tag = p.away ? 'away' : !p.micOn ? 'mic off' : '';
+        // For the host: a name in red is a mic that is not reaching us --
+        // off, unplugged, or silent -- whatever its owner ticked.
+        const micDead = host && p.id !== S.me.id && !p.away && !p.micLive;
+        if (micDead) li.className += ' mic-dead';
+        const tag = p.away ? 'away' : micDead ? (p.micOn ? 'mic not picking up' : 'mic not connected') : !p.micOn ? 'mic off' : '';
         li.innerHTML = `
           <div class="person-top">
             <span class="talk-dot ${p.speaking ? 'on' : p.away ? 'away' : ''}"></span>
@@ -1138,7 +1167,7 @@
 
   function tickClock() {
     const m = S.snap && S.snap.meeting;
-    $('meeting-clock').textContent = m ? fmt((m.endedAt || serverNow()) - m.startedAt) : '0:00';
+    $('meeting-clock').textContent = m ? fmt(activeMs(m)) : '0:00';
     checkNudge();
   }
   // While a ping menu is open, the list is not redrawn under the pointer.

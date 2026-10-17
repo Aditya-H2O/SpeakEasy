@@ -356,3 +356,9 @@ input[type="password"] { font: inherit; width: 100%; padding: 10px 12px; border-
 .hv-person { display: flex; gap: 10px; align-items: baseline; }
 .hv-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hv-lines { max-height: 60vh; }
+
+/* Pause, and the host's view of dead mics */
+.meeting-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.dot.paused { background: #d6a01e; }
+.person.mic-dead .person-name { color: var(--warn); }
+.person.mic-dead .person-name .tag { color: var(--warn); font-weight: 600; }

@@ -165,6 +165,7 @@ function snapshot(room) {
     meeting: m && {
       id: m.id, startedAt: m.startedAt, endedAt: m.endedAt,
       plannedMs: m.plannedMs, thresholdPct: m.thresholdPct,
+      pausedAt: m.pausedAt || null, pausedMs: m.pausedMs || 0,
     },
     lines: room.transcript.length,
     participants: [...room.participants.values()].map((p) => ({
@@ -175,6 +176,9 @@ function snapshot(room) {
       speaking: p.speaking && t - p.seenAt < LIMITS.awayMs,
       away: t - p.seenAt >= LIMITS.awayMs,
       micOn: p.micOn,
+      // On, and sound actually reaching the page (app.js micHealth). The
+      // host sees a name in red when this is false.
+      micLive: !!p.micLive && t - p.seenAt < LIMITS.awayMs,
       transcribing: !!p.transcribing && t - p.seenAt < LIMITS.awayMs,
       ms: m && p.meetingId === m.id ? Math.round(p.ms) : 0,
     })),
@@ -308,11 +312,12 @@ export function report(room, p, body) {
   p.leavingAt = null; // a reload that came back: not leaving after all
   p.speaking = !!body.speaking;
   p.micOn = !!body.micOn;
+  p.micLive = !!body.micLive;
   p.transcribing = !!body.transcribing;
   if (typeof body.name === 'string') p.name = cleanName(body.name);
 
   const m = room.meeting;
-  const live = m && !m.endedAt && body.meetingId === m.id;
+  const live = m && !m.endedAt && !m.pausedAt && body.meetingId === m.id;
   if (live) {
     if (p.meetingId !== m.id) { p.meetingId = m.id; p.ms = 0; p.reportedAt = Math.max(m.startedAt, p.joinedAt); }
     noteRoster(room, m.id, p);
@@ -325,7 +330,7 @@ export function report(room, p, body) {
     if (Number.isFinite(claimed) && claimed > p.ms) {
       const ceiling = Math.min(
         p.ms + (t - p.reportedAt) + LIMITS.reportSlackMs,
-        t - m.startedAt + LIMITS.reportSlackMs,
+        activeMs(m, t) + LIMITS.reportSlackMs,
       );
       p.ms = Math.min(claimed, ceiling);
     }
@@ -345,6 +350,29 @@ export function parsePlan(body) {
   return { plannedMs: Math.round(minutes) * 60000, thresholdPct: Math.round(pct) };
 }
 
+// Time the meeting has actually been running: wall time since it started,
+// minus every pause, including one in progress.
+export const activeMs = (m, t = now()) =>
+  (m.endedAt || t) - m.startedAt - (m.pausedMs || 0) - (m.pausedAt ? (m.endedAt || t) - m.pausedAt : 0);
+
+// A break: nobody's talk time counts, nobody is transcribed, the clock and
+// the halfway nudge stop. Resuming carries on from where it was.
+export function setPaused(room, paused) {
+  const m = room.meeting;
+  if (!m || m.endedAt) return false;
+  const t = now();
+  if (paused && !m.pausedAt) m.pausedAt = t;
+  else if (!paused && m.pausedAt) {
+    m.pausedMs = (m.pausedMs || 0) + (t - m.pausedAt);
+    m.pausedAt = null;
+    // Talk time is checked against time passed since the last report; the
+    // break is not time anyone could have been talking.
+    for (const p of room.participants.values()) p.reportedAt = t;
+  }
+  changed(room);
+  return true;
+}
+
 export function setMeeting(room, active, plan) {
   const t = now();
   const m = room.meeting;
@@ -352,6 +380,7 @@ export function setMeeting(room, active, plan) {
     room.meeting = { id: token(6), startedAt: t, endedAt: null, ...plan };
     for (const p of room.participants.values()) { p.meetingId = room.meeting.id; p.ms = 0; p.reportedAt = t; noteRoster(room, room.meeting.id, p); }
   } else if (!active && m && !m.endedAt) {
+    if (m.pausedAt) { m.pausedMs = (m.pausedMs || 0) + (t - m.pausedAt); m.pausedAt = null; }
     m.endedAt = t;
     archiveMeeting(room, m.id);
   }
@@ -389,6 +418,7 @@ export function archiveMeeting(room, meetingId) {
       endedAt: m.endedAt,
       plannedMs: m.plannedMs,
       thresholdPct: m.thresholdPct,
+      pausedMs: m.pausedMs || 0,
       hostName: hostP ? hostP.name : '',
       hostAccount: room.hostAccount || null,
       attendees: (room.attendees || {})[m.id] || [],
@@ -424,6 +454,7 @@ export function addLine(room, p, body) {
   const t = now();
   const m = room.meeting;
   if (!m || m.endedAt || body.meetingId !== m.id) return { status: 409, error: 'no meeting in progress' };
+  if (m.pausedAt) return { status: 409, error: 'the meeting is paused' };
   if (room.transcript.length >= LIMITS.linesPerRoom) return { status: 413, error: 'transcript is full' };
   if (t - (p.lineAt || 0) < LIMITS.lineGapMs) return { status: 429, error: 'too fast' };
   const text = cleanText(body.text);
@@ -599,15 +630,22 @@ function send(res, status, body, headers = {}) {
   res.end(json ? JSON.stringify(body) : body);
 }
 
+const TOO_BIG = Symbol('too big');
+
+// Over the limit, the rest of the body is read and thrown away rather than the
+// connection being cut: cutting it leaves nginx with a reset socket, which it
+// reports to the client as a 502 instead of the clean refusal it should be.
+// nginx caps every body at 16k first, so draining costs almost nothing.
 function readJson(req, limit = LIMITS.bodyBytes) {
   return new Promise((resolve) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > limit) { req.destroy(); resolve(null); } else chunks.push(c);
+      if (size <= limit) chunks.push(c);
     });
     req.on('end', () => {
+      if (size > limit) return resolve(TOO_BIG);
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { resolve(null); }
     });
     req.on('error', () => resolve(null));
@@ -700,6 +738,7 @@ export async function handle(req, res) {
       if (req.method === 'GET') return send(res, 200, readData(player.id));
       if (req.method === 'POST') {
         const body = await readJson(req, DATA_LIMITS.bodyBytes);
+        if (body === TOO_BIG) return send(res, 413, { error: 'request too large' });
         if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
         const r = writeData(player.id, body);
         return send(res, r.status, r.error ? { error: r.error } : r.data);
@@ -727,6 +766,7 @@ export async function handle(req, res) {
   // a room without one.
   if (parts.length === 2 && req.method === 'POST') {
     const body = await readJson(req);
+    if (body === TOO_BIG) return send(res, 413, { error: 'request too large' });
     if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
     const room = newRoom();
     if (!room) {
@@ -755,6 +795,7 @@ export async function handle(req, res) {
   if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
   const isSummary = action === 'transcript' && parts[4] === 'summary';
   const body = await readJson(req, isSummary ? LIMITS.summaryBodyBytes : LIMITS.bodyBytes);
+  if (body === TOO_BIG) return send(res, 413, { error: 'request too large' });
   if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
 
   if (action === 'join') {
@@ -791,6 +832,13 @@ export async function handle(req, res) {
     } else {
       setMeeting(room, !!body.active);
     }
+    return send(res, 200, { ok: true });
+  }
+
+  if (action === 'pause') {
+    if (!isHost) return send(res, 403, { error: 'only the host can pause the meeting' });
+    if (!live) return send(res, 409, { error: 'no meeting in progress' });
+    setPaused(room, !!body.paused);
     return send(res, 200, { ok: true });
   }
 
