@@ -154,6 +154,16 @@ await t('the last one out closes the room, and watchers are told', async () => {
   ctl.abort();
 });
 
+await t('the extension origin gets CORS, nobody else does', async () => {
+  const ext = 'chrome-extension://' + 'a'.repeat(32);
+  const ok = await fetch(`${BASE}/api/health`, { headers: { origin: ext } });
+  assert.equal(ok.headers.get('access-control-allow-origin'), ext);
+  const pre = await fetch(`${BASE}/api/rooms`, { method: 'OPTIONS', headers: { origin: ext } });
+  assert.equal(pre.status, 204);
+  const evil = await fetch(`${BASE}/api/health`, { headers: { origin: 'https://evil.example' } });
+  assert.equal(evil.headers.get('access-control-allow-origin'), null);
+});
+
 await t('health answers', async () =>assert.equal((await get('/api/health')).data.ok, true));
 
 console.log(`\n${pass} passed${process.exitCode ? ', some FAILED' : ''}`);

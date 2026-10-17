@@ -60,6 +60,35 @@ All under `/speakeasy/api/` in production (nginx strips the prefix).
 | `POST rooms/:code/leave {secret}` | |
 | `GET health` | |
 
+## Chrome extension
+
+`extension/` is the same app as a Chrome **side panel**. Click the toolbar
+button and it opens beside your Meet/Zoom/Teams tab and stays there as you
+switch tabs in that window. It uses the same server and the same rooms, so
+extension users and web users can be in one meeting together. Invite links
+point at the web app.
+
+**Install (unpacked):** `chrome://extensions` → turn on Developer mode → *Load
+unpacked* → pick the `extension/` folder.
+
+The first time you press *Turn on microphone*, a tab opens to ask for the mic,
+because a side panel cannot show Chrome's prompt. After you allow it once,
+the panel can use the mic. **Counting runs only while the panel is open.**
+
+What is generated and what is not:
+
+| File | |
+| --- | --- |
+| `manifest.json`, `sw.js`, `config.js`, `permission.*` | hand-written, extension only |
+| `sidepanel.html`, `app.js`, `style.css`, `vad-worklet.js`, `icon.svg`, `icons/` | **generated** from `web/` by `npm run build:extension` |
+
+Edit `web/` and re-run the build; never edit the copies. `npm test` fails if
+they have drifted. The server sends CORS headers for `chrome-extension://`
+origins, as a backup to the extension's host permission.
+
+When aditya-h.com is in private mode the extension is closed like the site,
+unless you are signed in as admin in the same Chrome profile.
+
 ## Run it locally
 
 ```bash

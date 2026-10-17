@@ -7,7 +7,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/server.test.mjs"
+    "test": "node test/server.test.mjs && node test/extension.test.mjs",
+    "build:extension": "node scripts/build-extension.mjs"
   },
   "engines": {
     "node": ">=20"

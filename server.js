@@ -237,7 +237,7 @@ function load() {
   for (const r of data) {
     // An empty room in the snapshot is one whose last person left; it was
     // only still there because an older build did not close rooms.
-    if (!isRoomCode(r.id) || !r.participants.length) continue;
+    if (!isRoomCode(r.id) || !r.participants.length) { dirty = true; continue; }
     rooms.set(r.id, {
       ...r,
       participants: new Map(r.participants.map((p) => [p.secret, p])),
@@ -309,8 +309,31 @@ function openStream(req, res, room) {
   req.on('close', () => room.streams.delete(res));
 }
 
+// The Chrome extension's side panel calls this API from a chrome-extension://
+// origin. Its host permission already exempts it from CORS, so these headers
+// are a second route rather than the only one -- and they name the exact
+// calling extension origin, never `*`, because they carry credentials (the
+// admin cookie, when the site is in private mode).
+const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
+function cors(req, res) {
+  const origin = req.headers.origin;
+  if (!origin || !EXTENSION_ORIGIN.test(origin)) return false;
+  res.setHeader('access-control-allow-origin', origin);
+  res.setHeader('access-control-allow-credentials', 'true');
+  res.setHeader('vary', 'Origin');
+  return true;
+}
+
 export async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
+  if (cors(req, res) && req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'access-control-allow-methods': 'GET, POST',
+      'access-control-allow-headers': 'content-type',
+      'access-control-max-age': '600',
+    });
+    return res.end();
+  }
   const parts = url.pathname.split('/').filter(Boolean);
 
   if (parts[0] !== 'api') {

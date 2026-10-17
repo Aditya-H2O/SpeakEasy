@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "SpeakEasy",
+  "version": "1.0.0",
+  "description": "See how much of a meeting you are doing the talking, live, next to your call.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Open SpeakEasy",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "permissions": ["sidePanel"],
+  "host_permissions": ["https://aditya-h.com/*"]
+}

@@ -4,9 +4,19 @@
 // report this person's running total to the room, and draw the room from the
 // snapshots the server streams back. Every URL is RELATIVE, because the app is
 // mounted at /speakeasy/ and must not care.
+//
+// The Chrome extension runs this same file in its side panel (a build script
+// copies it into extension/). There, extension/config.js sets
+// window.SPEAKEASY first, pointing the API at the real server and saying how to
+// get microphone permission, which a side panel cannot prompt for itself.
 
 (() => {
   'use strict';
+
+  const CFG = window.SPEAKEASY || {};
+  const API = CFG.api || 'api/';
+  const REMOTE = !!CFG.api; // calling the server from another origin: send the cookie along
+  const inviteLink = (code) => (CFG.invite || location.origin + location.pathname) + '?r=' + code;
 
   const $ = (id) => document.getElementById(id);
   const store = {
@@ -16,12 +26,18 @@
   };
 
   const api = async (path, body) => {
-    const res = await fetch('api/' + path, {
+    const res = await fetch(API + path, {
       method: body ? 'POST' : 'GET',
       headers: body ? { 'content-type': 'application/json' } : {},
       body: body ? JSON.stringify(body) : undefined,
       cache: 'no-store',
+      credentials: REMOTE ? 'include' : 'same-origin',
     });
+    // In private mode the site's gate redirects every request to its login
+    // page, and fetch follows it to a 200 full of HTML. Say what happened.
+    if (res.redirected && res.url.includes('/_gate/')) {
+      return { ok: false, status: 401, data: { error: 'aditya-h.com is private right now. Sign in at aditya-h.com/login first.' } };
+    }
     let data = null;
     try { data = await res.json(); } catch {}
     return { ok: res.ok, status: res.status, data };
@@ -138,7 +154,7 @@
 
   function connect() {
     if (S.events) S.events.close();
-    const es = new EventSource(`api/rooms/${S.code}/events`);
+    const es = new EventSource(`${API}rooms/${S.code}/events`, { withCredentials: REMOTE });
     S.events = es;
     es.onmessage = (e) => {
       const snap = JSON.parse(e.data);
@@ -217,7 +233,7 @@
   });
 
   $('copy').addEventListener('click', async () => {
-    const link = location.origin + location.pathname + '?r=' + S.code;
+    const link = inviteLink(S.code);
     try {
       await navigator.clipboard.writeText(link);
       $('copy').textContent = 'Copied';
@@ -282,10 +298,17 @@
       renderMic();
       report(true);
     } catch (err) {
-      $('mic-error').textContent =
-        err && err.name === 'NotAllowedError'
-          ? 'Microphone access was blocked. Allow it in the address bar and try again.'
-          : 'Could not start the microphone: ' + (err && err.message ? err.message : err);
+      const denied = err && err.name === 'NotAllowedError';
+      if (denied && CFG.requestMic) {
+        // The extension: a side panel cannot show the permission prompt, so a
+        // one-time tab asks instead. Chrome then remembers it for the extension.
+        CFG.requestMic();
+        $('mic-error').textContent = 'Allow the microphone in the tab that just opened, then press "Turn on microphone" again.';
+        return;
+      }
+      $('mic-error').textContent = denied
+        ? 'Microphone access was blocked. Allow it in the address bar and try again.'
+        : 'Could not start the microphone: ' + (err && err.message ? err.message : err);
     }
   }
 
