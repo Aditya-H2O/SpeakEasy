@@ -55,6 +55,12 @@ the transcript in its own scrolling pane; one column on narrow screens):
   room. A host leaving closes the room for everyone, which frees the one meeting
   slot. A host whose page vanishes without a word (crash, lid closed) closes the
   room after a minute.
+- **Pause / resume.** The host can pause for a break: talk time, transcription,
+  the clock and the halfway nudge all stop until they resume. History records
+  the real running time.
+- **Whose mic is dead.** For the host, a person's name turns red ("mic not
+  connected" / "mic not picking up") when no sound is reaching their page,
+  whatever they ticked.
 - **Close meeting.** The host's button closes the room for everyone (second
   click to confirm) and **deletes the transcript**. Download it first.
 - **One meeting at a time**, for now. Starting a second room is refused, and the
@@ -187,9 +193,10 @@ are JSON, capped at 4KB.
 | `POST rooms/:code/join {name}` | → `{id, secret}` |
 | `GET rooms/:code` | snapshot |
 | `GET rooms/:code/events` | SSE: snapshots; `line` (new transcript line); `closed` |
-| `POST rooms/:code/report {secret, speaking, micOn, transcribing, meetingId, ms}` | → `{pings}` addressed to you |
+| `POST rooms/:code/report {secret, speaking, micOn, micLive, transcribing, meetingId, ms}` | → `{pings}` addressed to you |
 | `POST rooms/:code/meeting {secret, active, durationMin, thresholdPct}` | host only; plan required to start |
 | `POST rooms/:code/ping {secret, to, kind}` | host only, during a meeting |
+| `POST rooms/:code/pause {secret, paused}` | host only; pause or resume |
 | `POST rooms/:code/transcript {secret, meetingId, text, startMs, endMs}` | add a line |
 | `POST rooms/:code/transcript/read {secret, meetingId?}` | lines; with scores and flags for the host |
 | `POST rooms/:code/transcript/flag {secret, n, flagged}` | host only; `null` returns to the model's verdict |
@@ -224,6 +231,43 @@ the panel is open.
 
 Edit `web/` and re-run the build; never edit the copies. `npm test` fails if
 they have drifted.
+
+## Stress test
+
+`scripts/stress.mjs` runs on the droplet and drives the real stack (nginx and
+Gate on loopback, never Cloudflare). It simulates the worst case the limits
+allow: one room, 24 people on live streams reporting every 2s, everyone
+talking, a tenth of it out of pocket, and a burst to fill the moderator's
+queue. It also runs 15 abuse checks. It refuses to run while a meeting is live
+and closes its room afterwards.
+
+```bash
+ssh aditya-h 'cd /opt/speakeasy && node scripts/stress.mjs 60'
+```
+
+**What the first run found (2026-10-17), and the fix.** With pages reporting
+every second and nginx opening a fresh loopback connection for every request
+(to SpeakEasy, and to Gate for the auth check), a full meeting filled the
+kernel's connection-tracking table (`nf_conntrack`, 4096 entries, each closed
+connection held for 120s). A full table **drops packets for every site on the
+box, SSH included**: one landing-page request took 68s. Fixed by an nginx
+keep-alive pool to SpeakEasy and a 2s reporting cadence.
+
+**After the fix:** 27/27 checks, **0 dropped packets**.
+
+| | |
+| --- | --- |
+| conntrack peak | 1,700 of 4,096 (42%) |
+| report latency | p50 6ms, p95 23ms, p99 38ms |
+| CPU avg / max | app 5% / 15%, moderator 18% / 48% (capped at 50%), Gate 3% / 7% |
+| memory peak | app 61MB (cap 128MB), moderator 101MB (cap 220MB) |
+| box MemAvailable | never under 124MB |
+| other sites | landing p50 83ms, worst 0.5s during the load |
+| moderation | 490 lines, all checked; 33/33 out-of-pocket flagged, 0 false flags; a 143-line burst drained in 11s |
+
+The remaining connection churn is Gate's per-request auth check, which is
+site-wide. If the site ever needs more headroom, a keep-alive upstream for Gate
+(or a larger `nf_conntrack_max`) is the next lever.
 
 ## Run it locally
 
