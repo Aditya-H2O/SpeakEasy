@@ -1,11 +1,15 @@
 [Unit]
 Description=SpeakEasy (plain Node, no dependencies)
 After=network.target
+# Asks the moderator to score transcript lines, but runs fine without it:
+# lines wait, marked unchecked, until it answers. So Wants, not Requires.
+Wants=speakeasy-moderator.service
 
-# No RequiresMountsFor: the checkout is on ROOT at /opt/speakeasy, like Gate and
-# VIZ. It is a few dozen kilobytes with no node_modules and no build, so the
-# volume would buy nothing, and keeping it off the volume means it still runs
-# if the volume fails to attach.
+# The checkout is on the 20GB volume at /mnt/twenty_gb_volume/opt/speakeasy, with
+# /opt/speakeasy a symlink to it. It moved there when the moderator arrived:
+# onnxruntime's node_modules is ~290MB, and root has ~3.4G to spare. The app
+# itself still has no dependencies.
+RequiresMountsFor=/mnt/twenty_gb_volume
 
 [Service]
 User=www-data
@@ -26,9 +30,10 @@ Environment=PORT=3008
 StateDirectory=speakeasy
 Environment=SPEAKEASY_STATE_FILE=/var/lib/speakeasy/rooms.json
 
-# ~40MB resident. The ceiling is a guard on a 458MB box, not a tuning knob:
-# the app's own caps (200 rooms, 24 people each) keep it far below this.
-MemoryMax=96M
+# ~45MB resident. The ceiling is a guard on a 458MB box, not a tuning knob:
+# the app's own caps (one room, 24 people, 4000 transcript lines) keep it far
+# below this.
+MemoryMax=128M
 
 ExecStart=/usr/bin/node server.js
 Restart=always

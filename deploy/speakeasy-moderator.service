@@ -1,0 +1,39 @@
+[Unit]
+Description=SpeakEasy moderator (open-weight toxicity model, CPU)
+After=network.target
+# node_modules (onnxruntime) and the model live with the checkout on the 20GB
+# volume; without it this would start against a dangling /opt/speakeasy.
+RequiresMountsFor=/mnt/twenty_gb_volume
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/speakeasy/moderator
+Environment=HOST=127.0.0.1
+Environment=PORT=3009
+Environment=MODEL_DIR=/opt/speakeasy/moderator/model
+Environment=NODE_ENV=production
+
+# A polite tenant on a 1-vCPU, 458MB droplet that runs a dozen other things.
+#
+# CPU: at most half the core, and at low priority within that, so a burst of
+# speech in a meeting cannot slow the rest of the site. One inference is a few
+# tens of milliseconds; the app queues lines rather than running them at once.
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=idle
+#
+# Memory: ~110MB with the model loaded, ~45MB once it is released after 10
+# idle minutes. MemoryHigh makes the kernel reclaim from this process first
+# under pressure; MemoryMax kills it (and only it) if it ever runs away.
+# SpeakEasy carries on without it -- lines wait, marked unchecked -- and
+# Restart brings it back.
+MemoryHigh=160M
+MemoryMax=220M
+
+ExecStart=/usr/bin/node --max-old-space-size=64 moderator.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

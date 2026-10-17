@@ -1,0 +1,19 @@
+{
+  "name": "speakeasy-moderator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Flags out-of-pocket transcript lines with a small open-weight toxicity model, on CPU.",
+  "type": "module",
+  "main": "moderator.js",
+  "scripts": {
+    "start": "node moderator.js",
+    "fetch-model": "node fetch-model.js",
+    "test": "node test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.30.0"
+  }
+}

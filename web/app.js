@@ -1,14 +1,16 @@
 // SpeakEasy, the page.
 //
-// Three jobs: listen to this laptop's microphone (through vad-worklet.js),
-// report this person's running total to the room, and draw the room from the
-// snapshots the server streams back. Every URL is RELATIVE, because the app is
-// mounted at /speakeasy/ and must not care.
+// Listens to this laptop's microphone (vad-worklet.js) and turns this one
+// person's speech into text (transcribe.js); reports both to the room; and
+// draws the room from what the server streams back. Every URL is RELATIVE,
+// because the app is mounted at /speakeasy/ and must not care.
 //
 // The Chrome extension runs this same file in its side panel (a build script
 // copies it into extension/). There, extension/config.js sets
 // window.SPEAKEASY first, pointing the API at the real server and saying how to
 // get microphone permission, which a side panel cannot prompt for itself.
+//
+// Personal notes and scheduled to-do lists are personal.js's business.
 
 (() => {
   'use strict';
@@ -17,6 +19,8 @@
   const API = CFG.api || 'api/';
   const REMOTE = !!CFG.api; // calling the server from another origin: send the cookie along
   const inviteLink = (code) => (CFG.invite || location.origin + location.pathname) + '?r=' + code;
+  const Personal = window.SpeakEasyPersonal;
+  const Transcriber = window.SpeakEasyTranscriber;
 
   const $ = (id) => document.getElementById(id);
   const store = {
@@ -44,7 +48,7 @@
   };
 
   const fmt = (ms) => {
-    const s = Math.floor(ms / 1000);
+    const s = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const ss = String(s % 60).padStart(2, '0');
@@ -53,6 +57,7 @@
 
   const show = (id) => {
     for (const v of ['lobby', 'room', 'gone']) $(v).hidden = v !== id;
+    document.body.dataset.view = id; // the header widens with the room
   };
 
   // ---------------------------------------------------------------- state --
@@ -74,19 +79,35 @@
     lastReport: 0,
     lastSpeaking: false,
     reporting: false,
+    // transcript
+    lines: [], // this meeting's lines; with flags when we are the host
+    hostView: false,
+    stt: null, // Transcriber
+    sttState: 'off',
+    // nudges and pings
+    nudged: null, // the meeting id we already nudged for
+    pingOpen: null, // whose ping menu is open
   };
 
   const serverNow = () => Date.now() + S.clockOffset;
   const liveMeeting = () => S.snap && S.snap.meeting && !S.snap.meeting.endedAt ? S.snap.meeting : null;
+  const meParticipant = () => S.snap && S.me && S.snap.participants.find((p) => p.id === S.me.id);
+  const amHost = () => !!(meParticipant() || {}).host;
 
   // ---------------------------------------------------------------- lobby --
 
-  function initLobby(prefillCode, error) {
+  async function initLobby(prefillCode, error) {
     show('lobby');
+    Personal.mountNotes($('notes-slot-lobby'));
     $('name').value = store.get('name') || '';
     $('code').value = prefillCode || '';
     $('lobby-error').textContent = error || '';
     (prefillCode ? $('name') : $('name').value ? $('create') : $('name')).focus();
+    // One meeting at a time: say so before anyone tries.
+    const r = await api('status').catch(() => null);
+    const full = !!(r && r.ok && r.data.full);
+    $('busy-note').hidden = !full;
+    $('create').disabled = full;
   }
 
   const nameValue = () => {
@@ -102,7 +123,11 @@
     // Making the room joins us to it as the host in the same request.
     const r = await api('rooms', { name });
     $('create').disabled = false;
-    if (!r.ok) { $('lobby-error').textContent = (r.data && r.data.error) || 'Could not create a room.'; return; }
+    if (!r.ok) {
+      $('lobby-error').textContent = (r.data && r.data.error) || 'Could not create a room.';
+      if (r.status === 409) { $('busy-note').hidden = false; $('create').disabled = true; }
+      return;
+    }
     store.set('room:' + r.data.room, { id: r.data.id, secret: r.data.secret });
     await enter(r.data.room, name);
   });
@@ -129,8 +154,10 @@
     }
     S.code = code;
     S.me = me;
+    S.lines = [];
     history.replaceState(null, '', '?r=' + code);
     $('room-code').textContent = code;
+    Personal.mountNotes($('notes-slot-room'));
     show('room');
     connect();
     report(true);
@@ -158,6 +185,7 @@
     store.del('room:' + S.code);
     stopMic();
     S.me = null;
+    S.snap = null;
     history.replaceState(null, '', location.pathname);
     show('gone');
   }
@@ -166,6 +194,7 @@
     if (S.events) S.events.close();
     const es = new EventSource(`${API}rooms/${S.code}/events`, { withCredentials: REMOTE });
     S.events = es;
+    es.onopen = () => loadTranscript();
     es.onmessage = (e) => {
       const snap = JSON.parse(e.data);
       S.clockOffset = snap.serverNow - Date.now();
@@ -173,6 +202,13 @@
       syncMeeting();
       render();
     };
+    es.addEventListener('line', (e) => {
+      const line = JSON.parse(e.data);
+      const m = S.snap && S.snap.meeting;
+      if (!m || line.meetingId !== m.id || S.lines.some((l) => l.n === line.n)) return;
+      S.lines.push(line);
+      renderTranscript();
+    });
     // The server closed the room: the host left, everyone left, or it was abandoned.
     es.addEventListener('closed', (e) => {
       let reason;
@@ -189,23 +225,23 @@
     };
   }
 
-  const amHost = () => {
-    const mine = S.snap && S.me && S.snap.participants.find((p) => p.id === S.me.id);
-    return !!(mine && mine.host);
-  };
-
   // A new meeting resets the worklet's counter. Coming back into a meeting
   // already in progress (a reload) starts the counter from what the server
   // already holds, since totals only ever go up.
   function syncMeeting() {
     const m = liveMeeting();
     const id = m ? m.id : null;
-    if (id === S.meetingId) return;
-    S.meetingId = id;
-    const mine = S.snap.participants.find((p) => p.id === S.me.id);
-    S.baseMs = m && mine ? mine.ms : 0;
-    S.vad.speakingMs = 0;
-    post({ reset: true, counting: counting() });
+    const latest = S.snap.meeting ? S.snap.meeting.id : null;
+    if (latest !== S.transcriptOf) { S.transcriptOf = latest; S.lines = []; loadTranscript(); }
+    if (id !== S.meetingId) {
+      S.meetingId = id;
+      const mine = meParticipant();
+      S.baseMs = m && mine ? mine.ms : 0;
+      S.vad.speakingMs = 0;
+      S.pingOpen = null;
+      post({ reset: true, counting: counting() });
+    }
+    syncTranscriber();
   }
 
   const counting = () => !!(liveMeeting() && S.audio && !S.paused);
@@ -228,11 +264,14 @@
         secret: S.me.secret,
         speaking,
         micOn: !!S.audio && !S.paused,
+        transcribing: ['on-device', 'cloud'].includes(S.sttState),
         meetingId: S.meetingId,
         ms: Math.round(myMs()),
       });
       if (r.status === 403) await rejoin();
       else if (r.status === 404) roomGone();
+      // The host's pings to us ride back on the reply.
+      else if (r.ok && r.data.pings) for (const p of r.data.pings) toast('From the host', p.text, 'ping');
     } catch {
       // offline for a moment; the next tick tries again
     } finally {
@@ -244,11 +283,28 @@
   // fine -- it is only presence, not counting.
   setInterval(() => report(false), 2000);
 
-  $('toggle').addEventListener('click', async () => {
-    $('toggle').disabled = true;
-    const r = await api(`rooms/${S.code}/meeting`, { secret: S.me.secret, active: !liveMeeting() });
-    if (r.status === 403) await rejoin();
-    $('toggle').disabled = false;
+  // -------------------------------------------------------------- meeting --
+
+  const lastPlan = store.get('plan') || {};
+  if (lastPlan.durationMin) $('plan-min').value = lastPlan.durationMin;
+  if (lastPlan.thresholdPct) $('plan-pct').value = lastPlan.thresholdPct;
+
+  $('plan-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const plan = { durationMin: Number($('plan-min').value), thresholdPct: Number($('plan-pct').value) };
+    store.set('plan', plan);
+    $('start').disabled = true;
+    const r = await api(`rooms/${S.code}/meeting`, { secret: S.me.secret, active: true, ...plan });
+    $('start').disabled = false;
+    $('meeting-error').textContent = r.ok ? '' : (r.data && r.data.error) || 'Could not start the meeting.';
+    if (r.status === 403 && !amHost()) await rejoin();
+  });
+
+  $('stop').addEventListener('click', async () => {
+    $('stop').disabled = true;
+    const r = await api(`rooms/${S.code}/meeting`, { secret: S.me.secret, active: false });
+    $('stop').disabled = false;
+    $('meeting-error').textContent = r.ok ? '' : (r.data && r.data.error) || 'Could not end the meeting.';
   });
 
   $('copy').addEventListener('click', async () => {
@@ -284,11 +340,14 @@
     else prompt('Copy this, then paste it in Discord:', msg);
   });
 
-  // For the host this button is "Close meeting", and it sends everyone out, so
-  // it takes a second click to be sure. A second click rather than confirm():
-  // a dialog is not something to rely on in the extension's side panel.
+  // For the host this button is "Close meeting", and it sends everyone out and
+  // deletes the transcript, so it takes a second click to be sure. A second
+  // click rather than confirm(): a dialog is not something to rely on in the
+  // extension's side panel.
   let armedUntil = 0;
-  const leaveLabel = () => (amHost() ? (Date.now() < armedUntil ? 'Click again to close for everyone' : 'Close meeting') : 'Leave');
+  const leaveLabel = () => (amHost()
+    ? (Date.now() < armedUntil ? 'Click again: closes the room and deletes the transcript' : 'Close meeting')
+    : 'Leave');
 
   $('leave').addEventListener('click', async () => {
     if (amHost() && Date.now() >= armedUntil) {
@@ -305,9 +364,72 @@
     if (S.events) S.events.close();
     stopMic();
     S.me = null;
+    S.snap = null;
     history.replaceState(null, '', location.pathname);
     initLobby('');
   });
+
+  // ------------------------------------------------------- toasts, nudges --
+
+  // A closable card in the corner. When the page is hidden (the call is in
+  // front, which is most of a meeting) it also raises a system notification,
+  // if the person allowed those.
+  function toast(title, text, kind = 'info') {
+    const el = document.createElement('div');
+    el.className = 'toast ' + kind;
+    el.setAttribute('role', kind === 'ping' || kind === 'nudge' ? 'alert' : 'status');
+    const b = document.createElement('strong');
+    b.textContent = title;
+    const p = document.createElement('p');
+    p.textContent = text;
+    const x = Object.assign(document.createElement('button'), { className: 'icon-btn', textContent: '×' });
+    x.setAttribute('aria-label', 'Dismiss');
+    x.addEventListener('click', () => el.remove());
+    el.append(b, p, x);
+    $('toasts').append(el);
+    if (kind === 'sent') setTimeout(() => el.remove(), 3500);
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted' && kind !== 'sent') {
+      try { new Notification(title, { body: text, icon: 'icon-512.png', tag: 'speakeasy-' + kind }); } catch {}
+    }
+  }
+
+  // Halfway through the planned meeting, anyone under the host's threshold
+  // gets one nudge. Measured as a share of all the talking so far, which is
+  // the percentage the room already shows.
+  function checkNudge() {
+    const m = liveMeeting();
+    if (!m || !m.plannedMs || S.nudged === m.id || !S.me) return;
+    if (serverNow() - m.startedAt < m.plannedMs / 2) return;
+    const people = S.snap.participants;
+    if (people.length < 2) return;
+    const total = people.reduce((a, p) => a + p.ms, 0);
+    const mine = Math.max((meParticipant() || {}).ms || 0, S.audio ? myMs() : 0);
+    const share = total ? (mine / total) * 100 : 0;
+    S.nudged = m.id;
+    if (share < m.thresholdPct) {
+      toast(
+        'Halfway there. Jump in?',
+        `You've had ${Math.round(share)}% of the talking so far, under the ${m.thresholdPct}% the host hoped everyone would reach. If you have something to add, now's a good time.`,
+        'nudge',
+      );
+    }
+  }
+
+  const PING_LABELS = {
+    share: 'Anything to share?',
+    wrap: 'Please wrap up',
+    time: 'Short on time',
+    hear: "Can't hear you",
+    noise: 'Background noise',
+    thanks: 'Thanks!',
+  };
+
+  async function sendPing(p, kind) {
+    S.pingOpen = null;
+    const r = await api(`rooms/${S.code}/ping`, { secret: S.me.secret, to: p.id, kind });
+    toast(r.ok ? `Sent to ${p.name}` : 'Not sent', r.ok ? PING_LABELS[kind] : (r.data && r.data.error) || 'Could not send the ping.', 'sent');
+    render();
+  }
 
   // ------------------------------------------------------------------ mic --
 
@@ -347,12 +469,16 @@
       S.audio = { ctx, stream, node };
       post({ thresholdDb: S.threshold, reset: true, counting: counting() });
       // Starting the mic part way through a meeting: count from what we have.
-      const mine = S.snap && S.snap.participants.find((p) => p.id === S.me.id);
+      const mine = meParticipant();
       S.baseMs = mine ? mine.ms : 0;
       $('mic').hidden = true;
       $('mic-live').hidden = false;
       renderMic();
+      syncTranscriber();
       report(true);
+      // Nudges and pings mostly arrive while the call is in front. A click
+      // is the moment a permission prompt is allowed to appear.
+      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
     } catch (err) {
       const denied = err && err.name === 'NotAllowedError';
       if (denied && CFG.requestMic) {
@@ -369,6 +495,7 @@
   }
 
   function stopMic() {
+    if (S.stt) S.stt.stop();
     if (!S.audio) return;
     S.audio.stream.getTracks().forEach((t) => t.stop());
     S.audio.ctx.close();
@@ -393,8 +520,172 @@
     // Pausing freezes the worklet's counter rather than resetting it, so the
     // total picks up where it left off when the box is unticked.
     post({ counting: counting() });
+    syncTranscriber();
     renderMic();
     report(true);
+  });
+
+  $('transcribe-me').checked = store.get('transcribeMe') !== false;
+  $('transcribe-me').addEventListener('change', () => {
+    store.set('transcribeMe', $('transcribe-me').checked);
+    syncTranscriber();
+  });
+
+  // ----------------------------------------------------------- transcript --
+
+  const STT_TEXT = {
+    starting: 'Starting transcription…',
+    'on-device': 'Transcribing on this device',
+    cloud: 'Transcribing (via Chrome’s speech service)',
+  };
+
+  // Transcribe exactly while: a meeting is on, the mic is on, we are not
+  // muted, and the person has not opted out.
+  function syncTranscriber() {
+    const want = !!(liveMeeting() && S.audio && !S.paused && $('transcribe-me').checked);
+    if (!Transcriber.supported) {
+      $('stt-state').textContent = want ? 'This browser cannot transcribe; use Chrome.' : '';
+      return;
+    }
+    if (!S.stt) {
+      S.stt = new Transcriber({
+        onLine: sendLine,
+        onState: (state, detail) => {
+          S.sttState = state;
+          $('stt-state').textContent = state === 'error' ? detail : STT_TEXT[state] || '';
+        },
+      });
+    }
+    if (want) S.stt.start();
+    else if (S.stt.want) S.stt.stop();
+  }
+
+  async function sendLine({ text, startAt, endAt }) {
+    const m = liveMeeting();
+    if (!m || !S.me) return;
+    const body = {
+      secret: S.me.secret,
+      meetingId: m.id,
+      text,
+      startMs: startAt + S.clockOffset - m.startedAt,
+      endMs: endAt + S.clockOffset - m.startedAt,
+    };
+    let r = await api(`rooms/${S.code}/transcript`, body).catch(() => null);
+    if (r && r.status === 429) {
+      await new Promise((res) => setTimeout(res, 400));
+      r = await api(`rooms/${S.code}/transcript`, body).catch(() => null);
+    }
+  }
+
+  // Everyone gets the lines as they are spoken (SSE). The host also polls for
+  // the moderator's verdicts, which are never broadcast.
+  let loadingTranscript = false;
+  async function loadTranscript() {
+    if (!S.me || loadingTranscript) return;
+    loadingTranscript = true;
+    try {
+      const r = await api(`rooms/${S.code}/transcript/read`, { secret: S.me.secret });
+      if (!r.ok) return;
+      const m = S.snap && S.snap.meeting;
+      if (r.data.meeting && m && r.data.meeting.id !== m.id) return; // raced a new meeting
+      S.lines = r.data.lines;
+      S.hostView = 'flagged' in r.data;
+      S.flagInfo = S.hostView ? { flagged: r.data.flagged, unchecked: r.data.unchecked } : null;
+      renderTranscript();
+    } finally {
+      loadingTranscript = false;
+    }
+  }
+  setInterval(() => {
+    // While anything could still change: a live meeting, or lines the model
+    // has not reached yet.
+    if (S.me && amHost() && (liveMeeting() || (S.flagInfo && S.flagInfo.unchecked))) loadTranscript();
+  }, 4000);
+
+  const isFlagged = (l) => (l.override ?? !!l.flag);
+  const LABEL_TEXT = { toxic: 'toxic', severe_toxic: 'severely toxic', obscene: 'obscene', threat: 'threat', insult: 'insult', identity_hate: 'identity hate' };
+  const flagWhy = (l) => {
+    if (l.override === true) return 'flagged by the host';
+    if (!l.flag) return '';
+    const labels = (l.flag.labels.length ? l.flag.labels : ['toxic']).map((x) => LABEL_TEXT[x] || x).join(', ');
+    return `${labels}${l.flag.kind === 'context' ? ', in context' : ''} · ${Math.round(l.flag.score * 100)}%`;
+  };
+
+  async function setFlag(l, flagged) {
+    // Back to the model's own verdict when the host's choice would match it.
+    const value = flagged === !!l.flag ? null : flagged;
+    l.override = value;
+    renderTranscript();
+    await api(`rooms/${S.code}/transcript/flag`, { secret: S.me.secret, n: l.n, flagged: value });
+    loadTranscript();
+  }
+
+  function renderTranscript() {
+    const list = $('transcript');
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    const host = S.hostView;
+    const onlyFlagged = host && $('flag-filter').checked;
+    const lines = onlyFlagged ? S.lines.filter(isFlagged) : S.lines;
+    $('flag-filter-wrap').hidden = !host;
+    $('transcript-download').hidden = !host || !S.lines.length;
+    $('transcript-empty').hidden = lines.length > 0;
+    $('transcript-empty').textContent = onlyFlagged ? 'Nothing flagged.' : 'What people say shows up here during the meeting.';
+
+    if (host && S.lines.length) {
+      const f = S.lines.filter(isFlagged).length;
+      const u = S.lines.filter((l) => !l.checked).length;
+      $('flag-summary').hidden = false;
+      $('flag-summary').className = 'flag-summary' + (f ? ' has-flags' : '');
+      $('flag-summary').textContent =
+        `${f ? `${f} line${f === 1 ? '' : 's'} flagged as out of pocket` : 'Nothing flagged'}` +
+        (u ? ` · ${u} still being checked` : '') + '. Only you can see flags.';
+    } else {
+      $('flag-summary').hidden = true;
+    }
+
+    list.replaceChildren(...lines.map((l) => {
+      const li = document.createElement('li');
+      li.className = 'line' + (S.me && l.pid === S.me.id ? ' mine' : '') + (host && isFlagged(l) ? ' flagged' : '');
+      const time = document.createElement('time');
+      time.textContent = fmt(l.startMs);
+      const who = document.createElement('span');
+      who.className = 'line-who';
+      who.textContent = l.name;
+      const text = document.createElement('span');
+      text.className = 'line-text';
+      text.textContent = l.text; // textContent: transcript text comes from other people's browsers
+      li.append(time, who, text);
+      if (host) {
+        const meta = document.createElement('div');
+        meta.className = 'line-meta';
+        if (!l.checked) meta.append(Object.assign(document.createElement('span'), { className: 'muted', textContent: 'checking…' }));
+        else if (isFlagged(l)) meta.append(Object.assign(document.createElement('span'), { className: 'why', textContent: '⚑ ' + flagWhy(l) }));
+        const btn = Object.assign(document.createElement('button'), {
+          className: 'link-btn',
+          textContent: isFlagged(l) ? 'Unflag' : 'Flag',
+        });
+        btn.addEventListener('click', () => setFlag(l, !isFlagged(l)));
+        meta.append(btn);
+        li.append(meta);
+      }
+      return li;
+    }));
+    if (nearBottom) list.scrollTop = list.scrollHeight;
+  }
+  $('flag-filter').addEventListener('change', renderTranscript);
+
+  $('transcript-download').addEventListener('click', () => {
+    const m = S.snap && S.snap.meeting;
+    const started = m ? new Date(m.startedAt) : new Date();
+    const out = [
+      `SpeakEasy transcript — room ${S.code}`,
+      `Started ${started.toLocaleString()}${m && m.endedAt ? `, ended ${new Date(m.endedAt).toLocaleString()}` : ''}`,
+      `${S.lines.filter(isFlagged).length} line(s) flagged as out of pocket (marked ⚑)`,
+      '',
+      ...S.lines.map((l) => `[${fmt(l.startMs)}] ${l.name}: ${l.text}${isFlagged(l) ? `   ⚑ ${flagWhy(l)}` : ''}`),
+      '',
+    ].join('\n');
+    Personal.download(`speakeasy-transcript-${started.toISOString().slice(0, 10)}-${S.code}.txt`, out);
   });
 
   // --------------------------------------------------------------- render --
@@ -417,17 +708,22 @@
 
   function render() {
     const snap = S.snap;
-    if (!snap) return;
+    if (!snap || !S.me) return;
     const m = snap.meeting;
     const live = liveMeeting();
+    const host = amHost();
 
     $('meeting-dot').classList.toggle('on', !!live);
     $('meeting-label').textContent = live ? 'Meeting in progress' : m ? 'Meeting ended' : 'No meeting yet';
-    const tg = $('toggle');
-    tg.textContent = live ? 'End meeting' : m ? 'Start a new meeting' : 'Start meeting';
-    tg.classList.toggle('primary', !live);
-    tg.classList.toggle('stop', !!live);
-    $('leave').textContent = leaveLabel();
+    $('meeting-plan').textContent = m && m.plannedMs
+      ? `Planned ${Math.round(m.plannedMs / 60000)} min · speak-up nudge under ${m.thresholdPct}% at the halfway mark`
+      : '';
+    $('plan-form').hidden = !host || !!live;
+    $('start').textContent = m ? 'Start a new meeting' : 'Start meeting';
+    $('stop').hidden = !host || !live;
+    $('waiting').hidden = host || !!live;
+    $('waiting').textContent = m ? 'The meeting has ended.' : 'Waiting for the host to start the meeting.';
+    if (!(Date.now() < armedUntil)) $('leave').textContent = leaveLabel();
 
     // Our own number is drawn from the local counter, which is ahead of the
     // server by up to a second; everyone else's comes from the snapshot.
@@ -437,6 +733,7 @@
     const total = people.reduce((a, p) => a + p.ms, 0);
     const n = people.length;
     people.sort((a, b) => b.ms - a.ms || a.name.localeCompare(b.name));
+    const threshold = m && m.thresholdPct;
 
     $('people-count').textContent = `${n} ${n === 1 ? 'person' : 'people'}`;
     $('people-empty').hidden = !!m;
@@ -456,19 +753,39 @@
           </div>
           <div class="bar"><div class="bar-fill" style="width:${(share * 100).toFixed(1)}%"></div>${
             m && n > 1 ? `<div class="bar-fair" style="left:${(100 / n).toFixed(1)}%" title="An even share"></div>` : ''
-          }</div>`;
+          }${threshold ? `<div class="bar-min" style="left:${threshold}%" title="Speak-up threshold"></div>` : ''}</div>`;
         const name = li.querySelector('.person-name');
         name.textContent = p.name; // textContent, never innerHTML: names come from strangers
         if (p.id === S.me.id) name.insertAdjacentHTML('beforeend', '<span class="you">you</span>');
         if (p.host) name.insertAdjacentHTML('beforeend', '<span class="tag">host</span>');
         if (tag) name.insertAdjacentHTML('beforeend', `<span class="tag">${tag}</span>`);
+
+        // The host's quiet pings, next to everyone but themselves.
+        if (host && live && p.id !== S.me.id) {
+          const btn = Object.assign(document.createElement('button'), { className: 'btn small ghost ping-btn', textContent: 'Ping' });
+          btn.setAttribute('aria-expanded', String(S.pingOpen === p.id));
+          btn.title = `Send ${p.name} a private ping`;
+          btn.addEventListener('click', () => { S.pingOpen = S.pingOpen === p.id ? null : p.id; render(); });
+          li.querySelector('.person-top').append(btn);
+          if (S.pingOpen === p.id) {
+            const menu = document.createElement('div');
+            menu.className = 'ping-menu';
+            for (const [kind, label] of Object.entries(PING_LABELS)) {
+              const b = Object.assign(document.createElement('button'), { className: 'btn small', textContent: label });
+              b.addEventListener('click', () => sendPing(p, kind));
+              menu.append(b);
+            }
+            li.append(menu);
+          }
+        }
         return li;
       }),
     );
     if (m && n > 1) {
       const note = document.createElement('p');
       note.className = 'muted fair-note';
-      note.textContent = `The tick on each bar is an even share: ${Math.round(100 / n)}% each with ${n} people.`;
+      note.textContent = `The grey tick is an even share (${Math.round(100 / n)}% each)` +
+        (threshold ? `; the orange one is the host's ${threshold}% speak-up threshold.` : '.');
       list.append(note);
     }
     tickClock();
@@ -477,11 +794,14 @@
   function tickClock() {
     const m = S.snap && S.snap.meeting;
     $('meeting-clock').textContent = m ? fmt((m.endedAt || serverNow()) - m.startedAt) : '0:00';
+    checkNudge();
   }
-  setInterval(() => { if (S.snap) (S.audio && liveMeeting() ? render : tickClock)(); }, 500);
+  // While a ping menu is open, the list is not redrawn under the pointer.
+  setInterval(() => { if (S.snap && S.me) (S.audio && liveMeeting() && !S.pingOpen ? render : tickClock)(); }, 500);
 
   // ----------------------------------------------------------------- boot --
 
+  Personal.init();
   const code = (new URLSearchParams(location.search).get('r') || '').toUpperCase();
   if (/^[A-Z2-9]{8}$/.test(code)) {
     if (store.get('room:' + code) || store.get('name')) enter(code, store.get('name'));

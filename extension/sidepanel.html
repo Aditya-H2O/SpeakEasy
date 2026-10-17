@@ -30,8 +30,8 @@
         <h1>Who's doing the talking?</h1>
         <p class="lede">
           Everyone in the meeting opens this page on their own laptop. Each one listens
-          only to its own microphone, works out when <em>its</em> person is speaking, and
-          the room adds it up, live.
+          only to <em>its</em> person, works out when they are speaking, and the room adds
+          it up, live, with a transcript as it goes.
         </p>
       </section>
 
@@ -42,9 +42,12 @@
         </label>
         <div class="lobby-actions">
           <button id="create" class="btn primary">Start a new room</button>
+          <p id="busy-note" class="muted small-note" hidden>
+            A meeting is already running. Only one can run at a time for now, so join it with its invite link.
+          </p>
           <div class="or"><span>or join one</span></div>
           <form id="join-form" class="join-row">
-            <input id="code" maxlength="8" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" />
+            <input id="code" maxlength="8" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" aria-label="Room code" />
             <button class="btn">Join</button>
           </form>
         </div>
@@ -52,14 +55,29 @@
       </section>
 
       <section class="how">
-        <div><b>1.</b> Start a room and send the link to everyone in the meeting.</div>
-        <div><b>2.</b> Each person turns on their mic here. Audio never leaves the laptop, only the totals do.</div>
-        <div><b>3.</b> Anyone can start and end the meeting. Everyone's clock runs only while it's on.</div>
+        <div><b>1.</b> The host starts a room, sets how long the meeting should run, and sends the link.</div>
+        <div><b>2.</b> Everyone turns on their mic. SpeakEasy counts their talk time and writes down what they say.</div>
+        <div><b>3.</b> Afterwards the host gets the transcript, with anything out of pocket flagged.</div>
       </section>
+
+      <div class="prep">
+        <section class="card">
+          <div class="card-head">
+            <h2>Your meetings</h2>
+            <div class="head-actions">
+              <button id="plan-import" class="btn small ghost" title="A .txt file, one to-do per line">Import to-do .txt</button>
+              <button id="plan-new" class="btn small">Schedule a meeting</button>
+            </div>
+          </div>
+          <p class="muted small-note">Plan ahead: give each meeting a to-do list and bring it in with you. Kept on this device only.</p>
+          <div id="planner" class="planner"></div>
+        </section>
+        <div id="notes-slot-lobby"></div>
+      </div>
     </main>
 
     <!-- Room -->
-    <main id="room" class="wrap" hidden>
+    <main id="room" class="wrap wide" hidden>
       <section class="room-head">
         <div>
           <div class="eyebrow">Room</div>
@@ -73,18 +91,75 @@
       </section>
       <p id="share-note" class="share-note" role="status" hidden></p>
 
+      <!-- Everyone is told, in the room itself, what is being recorded and who
+           gets to read it. -->
+      <p class="consent">
+        <b>This meeting is transcribed.</b> What each person says is written down and checked by an AI
+        model for out-of-pocket remarks. Everyone sees the transcript; only the host sees what was
+        flagged and can download it. It is deleted when the host closes the room.
+      </p>
+
       <section class="card meeting">
         <div class="meeting-status">
           <span id="meeting-dot" class="dot"></span>
           <div>
             <div id="meeting-label" class="meeting-label">No meeting yet</div>
             <div id="meeting-clock" class="clock">0:00</div>
+            <div id="meeting-plan" class="muted plan-line"></div>
           </div>
         </div>
-        <button id="toggle" class="btn primary big">Start meeting</button>
+
+        <!-- The host plans the meeting before starting it. -->
+        <form id="plan-form" class="plan-form" hidden>
+          <label class="field compact">
+            <span>Expected length</span>
+            <span class="with-unit"><input id="plan-min" type="number" min="1" max="480" step="1" value="30" required /> min</span>
+          </label>
+          <label class="field compact">
+            <span>Speak-up threshold</span>
+            <span class="with-unit"><input id="plan-pct" type="number" min="1" max="100" step="1" value="15" required /> %</span>
+          </label>
+          <button id="start" class="btn primary big">Start meeting</button>
+        </form>
+        <button id="stop" class="btn stop big" hidden>End meeting</button>
+        <p id="waiting" class="muted" hidden>Waiting for the host to start the meeting.</p>
+        <p id="meeting-error" class="error" role="alert"></p>
       </section>
 
-      <div class="grid">
+      <!-- Your mic, as a bar: it has to be there, but it is not what you watch. -->
+      <section class="card mic">
+        <div class="mic-row">
+          <strong>Your mic</strong>
+          <span id="me-speaking" class="pill">off</span>
+          <button id="mic" class="btn small primary">Turn on microphone</button>
+          <div id="mic-live" class="mic-live" hidden>
+            <div class="meter" aria-hidden="true">
+              <div id="meter-fill" class="meter-fill"></div>
+              <div id="meter-floor" class="meter-mark floor" title="Room noise"></div>
+              <div id="meter-thresh" class="meter-mark thresh" title="Counts as speaking above this"></div>
+            </div>
+            <label class="check"><input id="paused" type="checkbox" /><span>I'm muted</span></label>
+            <label class="check"><input id="transcribe-me" type="checkbox" checked /><span>Transcribe me</span></label>
+            <span id="stt-state" class="muted small-note"></span>
+          </div>
+          <details class="mic-more">
+            <summary>Settings</summary>
+            <label class="field slider">
+              <span>Sensitivity <output id="sens-out"></output></span>
+              <input id="sens" type="range" min="4" max="24" step="1" value="12" />
+              <small class="muted">Further right = needs to be louder. Raise it if other people's voices count as yours.</small>
+            </label>
+            <p class="muted small-note">
+              <b>Wear headphones.</b> If the call plays through your speakers, your mic hears the others too.
+              Speech-to-text is Chrome's: on-device where Chrome can, otherwise Chrome sends your audio to
+              Google to transcribe. SpeakEasy itself only receives the text.
+            </p>
+          </details>
+        </div>
+        <p id="mic-error" class="error" role="alert"></p>
+      </section>
+
+      <div class="room-grid">
         <section class="card people">
           <div class="card-head">
             <h2>Talk time</h2>
@@ -94,42 +169,28 @@
           <p id="people-empty" class="muted empty">Totals appear once the meeting starts.</p>
         </section>
 
-        <section class="card mic">
+        <section class="card transcript">
           <div class="card-head">
-            <h2>Your mic</h2>
-            <span id="me-speaking" class="pill">off</span>
-          </div>
-
-          <button id="mic" class="btn primary">Turn on microphone</button>
-          <p id="mic-error" class="error" role="alert"></p>
-
-          <div id="mic-live" hidden>
-            <div class="meter" aria-hidden="true">
-              <div id="meter-fill" class="meter-fill"></div>
-              <div id="meter-floor" class="meter-mark floor" title="Background noise"></div>
-              <div id="meter-thresh" class="meter-mark thresh" title="Speaking threshold"></div>
+            <h2>Transcript</h2>
+            <div class="head-actions">
+              <label id="flag-filter-wrap" class="check small-note" hidden><input id="flag-filter" type="checkbox" /><span>Flagged only</span></label>
+              <button id="transcript-download" class="btn small ghost" hidden>Download .txt</button>
             </div>
-            <div class="meter-legend muted">
-              <span><i class="sw floor"></i>room noise</span>
-              <span><i class="sw thresh"></i>counts as speaking above this</span>
-            </div>
-
-            <label class="field slider">
-              <span>Sensitivity <output id="sens-out"></output></span>
-              <input id="sens" type="range" min="4" max="24" step="1" value="12" />
-              <small class="muted">Further right = needs to be louder. Raise it if other people's voices are being counted as yours.</small>
-            </label>
-
-            <label class="check">
-              <input id="paused" type="checkbox" />
-              <span>I'm muted in the call — don't count me</span>
-            </label>
           </div>
+          <p id="flag-summary" class="flag-summary" hidden></p>
+          <ol id="transcript" class="transcript-list" aria-live="polite"></ol>
+          <p id="transcript-empty" class="muted empty">What people say shows up here during the meeting.</p>
+        </section>
 
-          <p class="tip">
-            <b>Wear headphones.</b> If the meeting plays out of your laptop speakers, your mic hears
-            everyone else too and will count some of their talking as yours.
-          </p>
+        <div id="notes-slot-room" class="notes-area"></div>
+
+        <section class="card todo">
+          <div class="card-head">
+            <h2>Your to-do list</h2>
+            <button id="room-todo-new" class="btn small ghost">New list</button>
+          </div>
+          <select id="room-todo-pick" class="select" aria-label="Which meeting's to-do list"></select>
+          <div id="room-todo"></div>
         </section>
       </div>
     </main>
@@ -138,10 +199,28 @@
       <section class="card center">
         <h1 id="gone-title">That room is closed</h1>
         <p id="gone-text" class="muted"></p>
-        <a class="btn primary" href="sidepanel.html">Start a new one</a>
+        <a class="btn primary" href="sidepanel.html">Back to the start</a>
       </section>
     </main>
 
+    <!-- Personal notes: one card, moved between the lobby and the room. -->
+    <section id="notes-card" class="card notes">
+      <div class="card-head">
+        <h2>Your notes</h2>
+        <div class="head-actions">
+          <button id="notes-import" class="btn small ghost">Import .txt</button>
+          <button id="notes-export" class="btn small ghost">Export .txt</button>
+        </div>
+      </div>
+      <textarea id="notes" rows="8" placeholder="Notes you keep from meeting to meeting. Only you see them." aria-label="Your notes"></textarea>
+      <p id="notes-saved" class="muted small-note">Saved on this device</p>
+    </section>
+
+    <!-- Nudges and pings land here. Each one can be closed. -->
+    <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+    <script src="transcribe.js"></script>
+    <script src="personal.js"></script>
     <script src="config.js"></script>
     <script src="app.js"></script>
   </body>

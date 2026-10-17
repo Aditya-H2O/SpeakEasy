@@ -1,129 +1,202 @@
 # SpeakEasy
 
 How much of the meeting are you doing the talking? Served at
-**https://aditya-h.com/speakeasy/**.
+**https://aditya-h.com/speakeasy/**, and as a Chrome side-panel extension.
 
-Everyone in the meeting opens the page on their own laptop and joins the same
-room. Each browser listens only to **its own** microphone, decides when its
-person is speaking, and reports a running total. The room shows everyone's talk
-time and share live, against an even-share mark. Anyone in the room can start
-or end the meeting, and every client's clock follows that one switch.
+Everyone in the meeting opens SpeakEasy on their own laptop and joins the same
+room. Each browser listens only to **its own** microphone, works out when its
+person is speaking, and turns what they say into text. The room shows
+everyone's talk time and share live, beside a running transcript. A small
+open-weight AI model on the server flags anything out of pocket, and the host
+gets the transcript with its flags at the end.
 
-**Audio never leaves the laptop.** Only the totals do.
+## What it does
+
+**In the room** (left column: talk time, your notes, your to-do list; right:
+the transcript in its own scrolling pane; one column on narrow screens):
+
+- **Talk time.** Each person's time and share, who is speaking now, an even-share
+  tick, and the host's speak-up threshold tick.
+- **Host and meeting plan.** Whoever creates a room is its host. Only the host
+  starts and ends the meeting, and must first enter the **expected length** and a
+  **speak-up threshold** (a percentage of the talking).
+- **Speak-up nudge.** At the halfway point of the planned length, anyone whose
+  share is under the threshold gets a closable card on screen (and a system
+  notification if the page is hidden and they allowed notifications).
+- **Pings.** The host has a *Ping* button next to everyone else, with a fixed set
+  of quiet messages ("Was there something you wanted to share?", "Please wrap up
+  what you're saying, for the sake of time.", short on time, can't hear you,
+  background noise, thanks). Only the recipient sees it.
+- **Transcript.** Every line has the speaker and a timestamp from the meeting's
+  start. Everyone sees it as it is written.
+- **Out-of-pocket flags.** Each line is scored by the moderator. Flags are shown
+  **to the host only**, with the reason (insult, threat, obscene, ...). The host
+  can unflag a line the model got wrong or flag one it missed, filter to flagged
+  lines, and **download the transcript as .txt**, during or after the meeting.
+- **Close meeting.** The host's button closes the room for everyone (second
+  click to confirm) and **deletes the transcript**. Download it first.
+- **One meeting at a time**, for now. Starting a second room is refused, and the
+  lobby says so, without revealing the running room's code.
+
+**Yours, kept in this browser only** (`localStorage`; never sent to the server):
+
+- **Notes** you carry from meeting to meeting. Export to .txt; import .txt
+  (appended, never replacing).
+- **Scheduled meetings**, each with a **to-do list**. Import a to-do list from a
+  .txt file (one item per line; leading `-`, `*`, `1.` or `[ ]` are stripped),
+  export it, tick items off. The one you choose to bring (or the one scheduled
+  nearest now) shows in the room.
+
+The website and the extension each have their own storage, so notes made in one
+are not in the other. Use export and import to move them.
+
+## Privacy, plainly
+
+- **Talk time** is decided on the laptop. Only the totals leave it.
+- **Speech-to-text** is Chrome's built-in speech recognition. Where Chrome can
+  do it on the device, audio stays on the laptop. Otherwise Chrome sends the
+  audio to Google's speech service to transcribe. The page says which is
+  happening. SpeakEasy's server only ever receives the text.
+- **The transcript** lives in the server's memory (and its restart snapshot)
+  while the room exists, and is deleted when the room closes. The room shows a
+  notice that the meeting is transcribed and checked. Anyone can untick
+  *Transcribe me*.
+- **Moderation** runs on the droplet itself. No transcript text goes to any
+  third-party AI service.
 
 ## How it works
 
 ```
-web/vad-worklet.js   voice detection on the audio thread (AudioWorklet)
-web/app.js           mic graph, reporting, rendering the room
-server.js            rooms, meeting toggle, totals; SSE fan-out. Zero dependencies
-deploy/speakeasy.service
-test/server.test.mjs
+web/vad-worklet.js     voice activity detection on the audio thread
+web/transcribe.js      speech-to-text for one person (Web Speech API)
+web/personal.js        notes, scheduled meetings, to-do lists (localStorage)
+web/app.js             the room: mic, reporting, transcript, pings, nudges
+server.js              rooms, host, meeting plan, totals, transcript, flags; SSE. Zero dependencies
+moderator/             the open-weight model service (onnxruntime-node)
+extension/             the Chrome side panel; mostly generated from web/
+deploy/                systemd units for both processes
 ```
 
-- **Detection.** Mic → highpass 120Hz → lowpass 3.4kHz → worklet. Every 20ms the
-  worklet takes the level in dB and tracks the room's noise floor (falls fast,
-  rises slowly). Speech is the level sitting `sensitivity` dB above the floor for
-  60ms; it stays "speaking" for 350ms after, so gaps between words count. It is
-  an AudioWorklet rather than a timer loop because during a meeting the tab is in
-  the background, where browsers throttle timers to once a second or less; the
-  audio thread is not throttled, and its messages also drive the reporting.
-- **Headphones matter.** Echo cancellation only removes audio *this browser*
-  plays. If Zoom/Meet/Teams plays through the laptop speakers, the mic hears the
-  others and some of their talking counts as yours. Raising the sensitivity helps;
-  headphones fix it.
-- **Trust.** The client is the only thing that can hear its person, so the server
-  trusts it about *whether* they are speaking, but not about how long: a total only
-  goes up, by at most the wall time since the last report, and never past the
-  meeting's length.
-- **Rooms** are an 8-character code (about 40 bits). Joining hands out a
-  per-participant secret that every write needs, so knowing the code gets you in
-  but does not let you report for somebody else. Rooms live in memory, are
-  snapshotted to `SPEAKEASY_STATE_FILE` every 15s and on shutdown. **Whoever
-  creates a room is its host.** The host's button reads *Close meeting* (it takes
-  a second click to confirm), and pressing it sends everyone out and closes the
-  room. A room also closes when its last person presses Leave, or 10 minutes after everyone has
-  closed the page (no open streams, no reports), and in any case after 12 idle
-  hours. Pages still open on it get an SSE `closed` event and say so. Caps: 200
-  rooms, 24 people a room, 2KB bodies.
+- **Talk-time detection.** Mic → highpass 120Hz → lowpass 3.4kHz → AudioWorklet.
+  Every 20ms it measures the level and tracks the room's noise floor. Speech is
+  the level sitting *sensitivity* dB above the floor for 60ms, with a 350ms
+  hangover. It runs on the audio thread because during a meeting the tab is in
+  the background, where timers are throttled.
+- **Trust.** The server trusts a client about *whether* its person is speaking,
+  never about how long: totals only go up, by at most the wall time since the
+  last report, and never past the meeting's length. Transcript times are clamped
+  inside the meeting too.
+- **Rooms** are an 8-character code (about 40 bits) plus a per-participant secret
+  for every write. A room closes when the host leaves, when the last person
+  leaves, 10 minutes after everyone has closed the page, or after 12 idle hours.
+
+### The moderator
+
+- **Model:** [`minuva/MiniLMv2-toxic-jigsaw-onnx`](https://huggingface.co/minuva/MiniLMv2-toxic-jigsaw-onnx),
+  Apache-2.0. A 6-layer MiniLM distilled from `unitary/toxic-bert` on the Jigsaw
+  toxic-comment data, int8-quantised to **23MB**. It gives six independent
+  probabilities: toxic, severe_toxic, obscene, threat, insult, identity_hate.
+  Pinned to one Hugging Face commit and checked by SHA-256 (`fetch-model.js`).
+  The weights are not in git.
+- **Why this and not an LLM:** the droplet has one vCPU and ~220MB of free RAM.
+  This model takes ~6ms a line on a laptop core and ~110MB resident. A chat
+  model would not fit.
+- **Runtime:** `onnxruntime-node`, one thread, with a hand-written BERT WordPiece
+  tokenizer instead of transformers.js, to save resident memory.
+  `moderator/test.mjs` checks the tokenizer's ids and the scores against the real
+  Hugging Face tokenizer and onnxruntime (`reference.json`).
+- **The rule** (`FLAG` in server.js). A line is flagged on its own when its worst
+  label is ≥ 0.70. It is also flagged *in context* when the speaker's last three
+  lines read together reach ≥ 0.80 and this line itself is ≥ 0.35, because speech
+  recognition chops one remark into fragments. Labels ≥ 0.50 are listed as the
+  reason.
+- **Keeping it from eating the box:**
+  - One inference at a time, bounded queues (it answers 503 rather than growing).
+  - The model is **released after 10 idle minutes**, so between meetings it is a
+    bare ~45MB Node process.
+  - systemd: `CPUQuota=50%`, `Nice=10`, idle I/O, `MemoryHigh=160M`, `MemoryMax=220M`.
+  - If it is down or killed, SpeakEasy keeps working. Lines wait, shown to the
+    host as "checking…", and are scored when it comes back.
 
 ## API
 
-All under `/speakeasy/api/` in production (nginx strips the prefix).
+All under `/speakeasy/api/` in production (nginx strips the prefix). Bodies
+are JSON, capped at 4KB.
 
 | | |
 | --- | --- |
-| `POST rooms {name}` | create and join as host → `{room, id, secret}` |
+| `GET status` | `{full}`: whether a new room would be refused |
+| `POST rooms {name}` | create and join as host → `{room, id, secret}` (409 if one is running) |
 | `POST rooms/:code/join {name}` | → `{id, secret}` |
 | `GET rooms/:code` | snapshot |
-| `GET rooms/:code/events` | SSE stream of snapshots |
-| `POST rooms/:code/report {secret, speaking, micOn, meetingId, ms}` | |
-| `POST rooms/:code/meeting {secret, active}` | start / end |
-| `POST rooms/:code/leave {secret}` | the host leaving closes the room → `{closed}` |
+| `GET rooms/:code/events` | SSE: snapshots; `line` (new transcript line); `closed` |
+| `POST rooms/:code/report {secret, speaking, micOn, transcribing, meetingId, ms}` | → `{pings}` addressed to you |
+| `POST rooms/:code/meeting {secret, active, durationMin, thresholdPct}` | host only; plan required to start |
+| `POST rooms/:code/ping {secret, to, kind}` | host only, during a meeting |
+| `POST rooms/:code/transcript {secret, meetingId, text, startMs, endMs}` | add a line |
+| `POST rooms/:code/transcript/read {secret, meetingId?}` | lines; with scores and flags for the host |
+| `POST rooms/:code/transcript/flag {secret, n, flagged}` | host only; `null` returns to the model's verdict |
+| `POST rooms/:code/leave {secret}` | the host leaving closes the room |
 | `GET health` | |
 
 ## Chrome extension
 
 `extension/` is the same app as a Chrome **side panel**. Click the toolbar
 button and it opens beside your Meet/Zoom/Teams tab and stays there as you
-switch tabs in that window. It uses the same server and the same rooms, so
-extension users and web users can be in one meeting together. Invite links
+switch tabs in that window. It uses the same server and rooms, and invite links
 point at the web app.
 
-**Install (unpacked):** `chrome://extensions` → turn on Developer mode → *Load
-unpacked* → pick the `extension/` folder.
+**Install (unpacked):** `chrome://extensions`, turn on Developer mode, click
+*Load unpacked*, and pick the `extension/` folder. After pulling changes, click
+*reload* on its card.
 
-The first time you press *Turn on microphone*, a tab opens to ask for the mic,
-because a side panel cannot show Chrome's prompt. After you allow it once,
-the panel can use the mic. **Counting runs only while the panel is open.**
-
-What is generated and what is not:
+The first *Turn on microphone* opens a tab to ask for the mic, because a side
+panel cannot show Chrome's prompt. Counting and transcription run only while
+the panel is open.
 
 | File | |
 | --- | --- |
 | `manifest.json`, `sw.js`, `config.js`, `permission.*` | hand-written, extension only |
-| `sidepanel.html`, `app.js`, `style.css`, `vad-worklet.js`, `icon.svg`, `icons/` | **generated** from `web/` by `npm run build:extension` |
+| `sidepanel.html`, `app.js`, `personal.js`, `transcribe.js`, `style.css`, `vad-worklet.js`, `icon.svg`, `icons/` | **generated** from `web/` by `npm run build:extension` |
 
 Edit `web/` and re-run the build; never edit the copies. `npm test` fails if
-they have drifted. The server sends CORS headers for `chrome-extension://`
-origins, as a backup to the extension's host permission.
-
-When aditya-h.com is in private mode the extension is closed like the site,
-unless you are signed in as admin in the same Chrome profile.
+they have drifted.
 
 ## Run it locally
 
 ```bash
-npm start            # http://127.0.0.1:3008
-npm test
+npm start                                    # http://127.0.0.1:3008
+cd moderator && npm ci && npm run fetch-model && npm start   # :3009, optional
+npm test                                     # server + extension
+cd moderator && npm test                     # tokenizer + model, needs the model
 ```
 
-`getUserMedia` needs a secure context. `localhost` counts; a LAN IP does not.
+`getUserMedia` and speech recognition need a secure context. `localhost` counts;
+a LAN IP does not. Without the moderator running, lines simply stay unchecked.
 
 ## Deploy (aditya-h.com)
 
 The droplet is **157.230.55.192** (`ssh aditya-h`). The site's README in
 `aditya-h/` covers the box as a whole. This repo is public, so no deploy key is
-needed.
+needed. The checkout is on the volume: `/opt/speakeasy` → `/mnt/twenty_gb_volume/opt/speakeasy`.
 
 ```bash
-cd /opt/speakeasy && git pull && systemctl restart speakeasy
-curl -s localhost:3008/api/health
+cd /opt/speakeasy && git pull
+cd moderator && npm ci --omit=dev --ignore-scripts && npm run fetch-model && cd ..
+chown -R www-data:www-data /opt/speakeasy/       # trailing slash: it is a symlink
+cp deploy/*.service /etc/systemd/system/ && systemctl daemon-reload
+systemctl restart speakeasy-moderator speakeasy
+curl -s localhost:3008/api/health; curl -s localhost:3009/health
 ```
 
-No build, no `npm ci`. The restart keeps rooms: the state is saved on SIGTERM
+`--ignore-scripts` is deliberate. onnxruntime-node's install script only fetches
+optional GPU providers. The CPU build ships in the package and is all this box
+can use.
+
+Restarting `speakeasy` keeps rooms and transcripts: state is saved on SIGTERM
 and reloaded on start.
-
-First time only:
-```bash
-git clone https://github.com/Aditya-H2O/SpeakEasy.git /opt/speakeasy
-cp /opt/speakeasy/deploy/speakeasy.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now speakeasy
-curl -s localhost:3008/api/health          # before touching nginx
-```
 
 **Gate first, then nginx.** `/speakeasy` is in Gate's `ROOM_PREFIXES` (every
 method passes the door; the app checks the room). nginx has the `/speakeasy/`
-proxy block plus 301s from `/speakeasy` and `/SpeakEasy`. **When the site is in
-private mode, SpeakEasy is closed with everything else**, so people without the
-admin login cannot join.
+proxy block (4k body cap) plus 301s from `/speakeasy` and `/SpeakEasy`. **When
+the site is in private mode, SpeakEasy is closed with everything else.**
