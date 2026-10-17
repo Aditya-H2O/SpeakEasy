@@ -39,8 +39,11 @@ test/server.test.mjs
 - **Rooms** are an 8-character code (about 40 bits). Joining hands out a
   per-participant secret that every write needs, so knowing the code gets you in
   but does not let you report for somebody else. Rooms live in memory, are
-  snapshotted to `SPEAKEASY_STATE_FILE` every 15s and on shutdown, and expire
-  after 12 idle hours. Caps: 200 rooms, 24 people a room, 2KB bodies.
+  snapshotted to `SPEAKEASY_STATE_FILE` every 15s and on shutdown. **A room
+  closes when its last person presses Leave**, or 10 minutes after everyone has
+  closed the page (no open streams, no reports), and in any case after 12 idle
+  hours. Pages still open on it get an SSE `closed` event and say so. Caps: 200
+  rooms, 24 people a room, 2KB bodies.
 
 ## API
 

@@ -58,7 +58,7 @@ function roomCode() {
 const isRoomCode = (s) => typeof s === 'string' && /^[A-Z2-9]{8}$/.test(s);
 
 function newRoom() {
-  if (rooms.size >= LIMITS.rooms) sweep(true);
+  if (rooms.size >= LIMITS.rooms) sweep();
   if (rooms.size >= LIMITS.rooms) return null;
   let id;
   do id = roomCode(); while (rooms.has(id));
@@ -116,14 +116,29 @@ function changed(room) {
   setTimeout(() => { pending.delete(room); broadcast(room); }, 150);
 }
 
-function sweep(aggressive = false) {
+// A room ends when its people do. Open streams are told first, so a page
+// still sitting on the room says so instead of quietly reconnecting to a 404.
+function closeRoom(room) {
+  const data = `event: closed\ndata: {}\n\n`;
+  for (const res of room.streams) { res.write(data); res.end(); }
+  room.streams.clear();
+  rooms.delete(room.id);
+  pending.delete(room);
+  dirty = true;
+}
+
+// Abandoned: nobody watching and nobody reporting. That is everyone having
+// closed the tab without pressing Leave, which is how most meetings end.
+const abandoned = (room, t) =>
+  room.streams.size === 0 &&
+  [...room.participants.values()].every((p) => t - p.seenAt > LIMITS.participantGoneMs) &&
+  t - room.createdAt > LIMITS.participantGoneMs;
+
+function sweep() {
   const t = now();
   for (const room of rooms.values()) {
-    const idleFor = t - room.touchedAt;
-    if (idleFor > LIMITS.roomIdleMs || (aggressive && room.streams.size === 0 && idleFor > 60 * 60 * 1000)) {
-      for (const res of room.streams) res.end();
-      rooms.delete(room.id);
-      dirty = true;
+    if (t - room.touchedAt > LIMITS.roomIdleMs || abandoned(room, t)) {
+      closeRoom(room);
       continue;
     }
     for (const [secret, p] of room.participants) {
@@ -220,7 +235,9 @@ function load() {
   let data;
   try { data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return; }
   for (const r of data) {
-    if (!isRoomCode(r.id)) continue;
+    // An empty room in the snapshot is one whose last person left; it was
+    // only still there because an older build did not close rooms.
+    if (!isRoomCode(r.id) || !r.participants.length) continue;
     rooms.set(r.id, {
       ...r,
       participants: new Map(r.participants.map((p) => [p.secret, p])),
@@ -341,7 +358,14 @@ export async function handle(req, res) {
 
   if (action === 'report') { report(room, p, body); return send(res, 200, { ok: true }); }
   if (action === 'meeting') { p.seenAt = now(); setMeeting(room, !!body.active); return send(res, 200, { ok: true }); }
-  if (action === 'leave') { room.participants.delete(p.secret); changed(room); return send(res, 200, { ok: true }); }
+  if (action === 'leave') {
+    room.participants.delete(p.secret);
+    // The last one out closes the room: no lingering results, no code that
+    // still works tomorrow.
+    if (room.participants.size === 0) closeRoom(room);
+    else changed(room);
+    return send(res, 200, { ok: true, closed: room.participants.size === 0 });
+  }
   return send(res, 404, { error: 'not found' });
 }
 

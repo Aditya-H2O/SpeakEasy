@@ -130,6 +130,9 @@
   function roomGone() {
     if (S.events) S.events.close();
     store.del('room:' + S.code);
+    stopMic();
+    S.me = null;
+    history.replaceState(null, '', location.pathname);
     show('gone');
   }
 
@@ -144,6 +147,8 @@
       syncMeeting();
       render();
     };
+    // The server closed the room (everyone left, or it was abandoned).
+    es.addEventListener('closed', roomGone);
     es.onerror = async () => {
       // EventSource retries on its own after a dropped connection, but gives
       // up for good on a non-200. Find out which, so a deleted room says so.

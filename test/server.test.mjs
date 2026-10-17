@@ -135,7 +135,26 @@ await t('leaving removes you', async () => {
   assert.equal((await post(`/api/rooms/${room}/report`, { secret: b.secret })).status, 403);
 });
 
-await t('health answers', async () => assert.equal((await get('/api/health')).data.ok, true));
+await t('the last one out closes the room, and watchers are told', async () => {
+  const ctl = new AbortController();
+  const res = await fetch(`${BASE}/api/rooms/${room}/events`, { signal: ctl.signal });
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  const left = await post(`/api/rooms/${room}/leave`, { secret: a.secret });
+  assert.equal(left.data.closed, true);
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value);
+  }
+  assert.match(buf, /event: closed/);
+  assert.equal((await get(`/api/rooms/${room}`)).status, 404);
+  assert.equal((await post(`/api/rooms/${room}/join`, { name: 'late' })).status, 404);
+  ctl.abort();
+});
+
+await t('health answers', async () =>assert.equal((await get('/api/health')).data.ok, true));
 
 console.log(`\n${pass} passed${process.exitCode ? ', some FAILED' : ''}`);
 server.closeAllConnections();
