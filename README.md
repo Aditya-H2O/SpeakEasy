@@ -33,12 +33,44 @@ the transcript in its own scrolling pane; one column on narrow screens):
   **to the host only**, with the reason (insult, threat, obscene, ...). The host
   can unflag a line the model got wrong or flag one it missed, filter to flagged
   lines, and **download the transcript as .txt**, during or after the meeting.
+- **AI summary.** When the host presses *End meeting*, the host's own Chrome
+  summarises the transcript on their computer: decisions, action items, owners.
+  It appears at the top of their transcript pane, is saved with the room, and is
+  included in the download. It needs desktop Chrome with its built-in AI (Chrome
+  138+, roughly 16GB RAM and 22GB free disk, plus a one-time model download).
+  Anywhere else the host is told so, and the transcript download still works.
+- **Your speaking habits, on your screen only.** A small red card (closable)
+  when you use a lot of filler words ("like", "you know", "basically"... over 8
+  per 100 words, at most every 3 minutes), and when you start talking over
+  someone who was already mid-sentence (at most once a minute). Nobody else sees
+  either. Chrome's speech recognition mostly leaves "um" and "uh" out of its
+  text, so those are under-counted.
+- **The mic bar blinks** whenever no sound is reaching SpeakEasy: mic off,
+  unplugged, or sending pure silence. "I'm muted" does not stop it, because that
+  box only pauses the counting.
+- **Leaving.** Leave takes a confirming second click. Closing or reloading the
+  tab asks first. A tab that closes anyway tells the server on its way out, and
+  after 15 seconds (a reload comes back sooner and cancels it) you are out of the
+  room. A host leaving closes the room for everyone, which frees the one meeting
+  slot. A host whose page vanishes without a word (crash, lid closed) closes the
+  room after a minute.
 - **Close meeting.** The host's button closes the room for everyone (second
   click to confirm) and **deletes the transcript**. Download it first.
 - **One meeting at a time**, for now. Starting a second room is refused, and the
   lobby says so, without revealing the running room's code.
 
-**Yours, kept in this browser only** (`localStorage`; never sent to the server):
+**Accounts.** SpeakEasy uses aditya-h.com's existing visitor accounts, the same
+sign-in as Grounds Guessr and VS. Making one needs the site's invite code. Sign
+in from the lobby; it is optional, and anyone can join a meeting without one.
+Signed-in people get a ✓ in the room. SpeakEasy never sees your password hash
+or holds the site's session key: it asks Grounds Guessr, over loopback, who your
+session cookie belongs to.
+
+**Yours: notes and scheduled meetings.** Signed in, they are saved to your
+account on the server (`/mnt/twenty_gb_volume/speakeasy/users/<id>.json`) and
+follow you to any device and into the extension. The first sign-in moves this
+browser's copy up to an account that is still empty. Signed out, they stay in
+this browser only (`localStorage`):
 
 - **Notes** you carry from meeting to meeting. Export to .txt; import .txt
   (appended, never replacing).
@@ -47,8 +79,8 @@ the transcript in its own scrolling pane; one column on narrow screens):
   export it, tick items off. The one you choose to bring (or the one scheduled
   nearest now) shows in the room.
 
-The website and the extension each have their own storage, so notes made in one
-are not in the other. Use export and import to move them.
+Signed out, the website and the extension each have their own storage, so use
+export and import to move things between them, or sign in.
 
 ## Privacy, plainly
 
@@ -61,15 +93,19 @@ are not in the other. Use export and import to move them.
   while the room exists, and is deleted when the room closes. The room shows a
   notice that the meeting is transcribed and checked. Anyone can untick
   *Transcribe me*.
-- **Moderation** runs on the droplet itself. No transcript text goes to any
-  third-party AI service.
+- **Moderation** runs on the droplet itself, and the **summary** runs in the
+  host's own browser. No transcript text goes to any third-party AI service.
+- **Accounts:** your notes and scheduled meetings are stored under your account
+  on the droplet; only requests carrying your own session can read them.
 
 ## How it works
 
 ```
 web/vad-worklet.js     voice activity detection on the audio thread
 web/transcribe.js      speech-to-text for one person (Web Speech API)
-web/personal.js        notes, scheduled meetings, to-do lists (localStorage)
+web/personal.js        notes, scheduled meetings, to-do lists (account or localStorage)
+web/summarize.js       the host's on-device AI summary (Chrome Summarizer API)
+accounts.js            who a request is (via Grounds Guessr), and per-account data
 web/app.js             the room: mic, reporting, transcript, pings, nudges
 server.js              rooms, host, meeting plan, totals, transcript, flags; SSE. Zero dependencies
 moderator/             the open-weight model service (onnxruntime-node)
@@ -137,6 +173,9 @@ are JSON, capped at 4KB.
 | `POST rooms/:code/transcript/read {secret, meetingId?}` | lines; with scores and flags for the host |
 | `POST rooms/:code/transcript/flag {secret, n, flagged}` | host only; `null` returns to the model's verdict |
 | `POST rooms/:code/leave {secret}` | the host leaving closes the room |
+| `POST rooms/:code/transcript/summary {secret, meetingId, text}` | host only, after the meeting ends |
+| `GET me` | `{player, accounts}`: who your aditya-h.com session is |
+| `GET me/data` / `POST me/data {version, notes, plans, activePlan}` | your saved data; a stale `version` gets 409 and the newer copy |
 | `GET health` | |
 
 ## Chrome extension
@@ -157,7 +196,7 @@ the panel is open.
 | File | |
 | --- | --- |
 | `manifest.json`, `sw.js`, `config.js`, `permission.*` | hand-written, extension only |
-| `sidepanel.html`, `app.js`, `personal.js`, `transcribe.js`, `style.css`, `vad-worklet.js`, `icon.svg`, `icons/` | **generated** from `web/` by `npm run build:extension` |
+| `sidepanel.html`, `app.js`, `personal.js`, `summarize.js`, `transcribe.js`, `style.css`, `vad-worklet.js`, `icon.svg`, `icons/` | **generated** from `web/` by `npm run build:extension` |
 
 Edit `web/` and re-run the build; never edit the copies. `npm test` fails if
 they have drifted.
@@ -182,6 +221,7 @@ needed. The checkout is on the volume: `/opt/speakeasy` → `/mnt/twenty_gb_volu
 
 ```bash
 cd /opt/speakeasy && git pull
+install -d -o www-data -g www-data /mnt/twenty_gb_volume/speakeasy/users   # first time
 cd moderator && npm ci --omit=dev --ignore-scripts && npm run fetch-model && cd ..
 chown -R www-data:www-data /opt/speakeasy/       # trailing slash: it is a symlink
 cp deploy/*.service /etc/systemd/system/ && systemctl daemon-reload
@@ -198,5 +238,7 @@ and reloaded on start.
 
 **Gate first, then nginx.** `/speakeasy` is in Gate's `ROOM_PREFIXES` (every
 method passes the door; the app checks the room). nginx has the `/speakeasy/`
-proxy block (4k body cap) plus 301s from `/speakeasy` and `/SpeakEasy`. **When
+proxy block (16k body cap, for the summary; the app caps everything else at
+4k), a `/speakeasy/api/me/` block (600k, for account data), plus 301s from
+`/speakeasy` and `/SpeakEasy`. **When
 the site is in private mode, SpeakEasy is closed with everything else.**

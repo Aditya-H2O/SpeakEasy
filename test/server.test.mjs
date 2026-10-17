@@ -22,6 +22,22 @@ const fakeModerator = http.createServer((req, res) => {
 await new Promise((r) => fakeModerator.listen(0, '127.0.0.1', r));
 process.env.SPEAKEASY_MODERATOR_URL = `http://127.0.0.1:${fakeModerator.address().port}`;
 
+// The site's accounts, faked: Grounds Guessr's GET /api/auth/me, which knows
+// exactly one session cookie.
+const PLAYER = { id: '11111111-2222-3333-4444-555555555555', username: 'aditya' };
+const SESSION = `${PLAYER.id}.9999999999999.${'ab'.repeat(32)}`;
+const fakeAccounts = http.createServer((req, res) => {
+  const signedIn = (req.headers.cookie || '').includes(`aditya_player=${SESSION}`);
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ player: signedIn ? PLAYER : null }));
+});
+await new Promise((r) => fakeAccounts.listen(0, '127.0.0.1', r));
+process.env.SPEAKEASY_ACCOUNTS_ME_URL = `http://127.0.0.1:${fakeAccounts.address().port}/me`;
+const os = await import('node:os');
+const fsx = await import('node:fs');
+const pathx = await import('node:path');
+process.env.SPEAKEASY_USER_DIR = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'speakeasy-users-'));
+
 const { createServer, LIMITS, PINGS, decideFlag, sweep } = await import('../server.js');
 LIMITS.rooms = 5; // the one-room rule has its own test below
 
@@ -230,6 +246,16 @@ await t('the host can still read the ended meeting, flags and all', async () => 
   assert.ok(tr.lines.length >= 3);
   assert.ok(tr.lines.every((l) => 'flag' in l));
 });
+await t('the host keeps the AI summary with the ended meeting; nobody else sees it', async () => {
+  const text = '- Launch moves to Thursday (Bea)\n- Aditya to confirm the budget';
+  assert.equal((await post(`/api/rooms/${room}/transcript/summary`, { secret: b.secret, meetingId, text })).status, 403);
+  assert.equal((await post(`/api/rooms/${room}/transcript/summary`, { secret: a.secret, meetingId: 'other', text })).status, 409);
+  assert.equal((await post(`/api/rooms/${room}/transcript/summary`, { secret: a.secret, meetingId, text: 's'.repeat(13000) })).status, 200);
+  assert.equal((await post(`/api/rooms/${room}/transcript/read`, { secret: a.secret })).data.summary.text.length, LIMITS.summaryChars);
+  assert.equal((await post(`/api/rooms/${room}/transcript/summary`, { secret: a.secret, meetingId, text })).status, 200);
+  assert.equal((await post(`/api/rooms/${room}/transcript/read`, { secret: a.secret })).data.summary.text, text);
+  assert.ok(!('summary' in (await post(`/api/rooms/${room}/transcript/read`, { secret: b.secret })).data));
+});
 await t('starting again begins from zero', async () => {
   await post(`/api/rooms/${room}/meeting`, { secret: a.secret, active: true, ...PLAN });
   const { data } = await get(`/api/rooms/${room}`);
@@ -373,6 +399,72 @@ await t('a closed room cannot be rejoined, and takes its transcript with it', as
   assert.equal((await get('/api/status')).data.full, false);
 });
 
+// ---- accounts
+const asMe = (path, body) => fetch(BASE + path, {
+  method: body ? 'POST' : 'GET',
+  headers: { cookie: `aditya_player=${SESSION}`, ...(body && { 'content-type': 'application/json' }) },
+  body: body && JSON.stringify(body),
+}).then(async (r) => ({ status: r.status, data: await r.json() }));
+
+await t('signed out, /me says so; signed in, it says who', async () => {
+  assert.deepEqual((await get('/api/me')).data, { player: null, accounts: true });
+  assert.deepEqual((await asMe('/api/me')).data.player, PLAYER);
+  // A cookie of the wrong shape never even leaves the process.
+  const r = await fetch(`${BASE}/api/me`, { headers: { cookie: 'aditya_player=nope' } });
+  assert.equal((await r.json()).player, null);
+});
+await t('your notes and meetings are yours alone', async () => {
+  assert.equal((await get('/api/me/data')).status, 401);
+  assert.equal((await post('/api/me/data', { version: 0, notes: 'x' })).status, 401);
+  const empty = (await asMe('/api/me/data')).data;
+  assert.equal(empty.version, 0);
+  const saved = await asMe('/api/me/data', {
+    version: 0,
+    notes: 'Bea owns the API',
+    plans: [{ id: 'p1', title: 'Weekly sync', when: '2026-10-20T10:00', todos: [{ id: 't1', text: 'Ask about launch', done: false }] }],
+    activePlan: 'p1',
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.version, 1);
+  const back = (await asMe('/api/me/data')).data;
+  assert.equal(back.notes, 'Bea owns the API');
+  assert.equal(back.plans[0].todos[0].text, 'Ask about launch');
+  assert.equal(back.activePlan, 'p1');
+});
+await t('a stale save is refused with the newer copy, not merged blindly', async () => {
+  const r = await asMe('/api/me/data', { version: 0, notes: 'from an old tab' });
+  assert.equal(r.status, 409);
+  assert.equal(r.data.notes, 'Bea owns the API');
+});
+await t('saved data is trimmed to known shapes', async () => {
+  const r = await asMe('/api/me/data', {
+    version: 1,
+    notes: 'n'.repeat(300000),
+    plans: [{ id: 'ok', title: 't'.repeat(500), when: 'not a date', todos: [{ id: 'a', text: '' }, { id: 'b', text: 'keep', extra: 'dropped' }] }, { title: 'no id' }],
+    activePlan: 'nonexistent',
+    evil: true,
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.notes.length, 200000);
+  assert.equal(r.data.plans.length, 1);
+  assert.equal(r.data.plans[0].title.length, 80);
+  assert.equal(r.data.plans[0].when, '');
+  assert.deepEqual(r.data.plans[0].todos, [{ id: 'b', text: 'keep', done: false }]);
+  assert.equal(r.data.activePlan, null);
+  assert.ok(!('evil' in r.data));
+});
+await t('a signed-in participant is marked as one', async () => {
+  const saved = LIMITS.rooms;
+  LIMITS.rooms = 5;
+  const h = (await asMe('/api/rooms', { name: 'Aditya' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  const people = (await get(`/api/rooms/${h.room}`)).data.participants;
+  assert.equal(people.find((p) => p.id === h.id).account, true);
+  assert.equal(people.find((p) => p.id === g.id).account, false);
+  await post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
+  LIMITS.rooms = saved;
+});
+
 await t('the extension origin gets CORS, nobody else does', async () => {
   const ext = 'chrome-extension://' + 'a'.repeat(32);
   const ok = await fetch(`${BASE}/api/health`, { headers: { origin: ext } });
@@ -389,3 +481,4 @@ console.log(`\n${pass} passed${process.exitCode ? ', some FAILED' : ''}`);
 server.closeAllConnections();
 server.close();
 fakeModerator.close();
+fakeAccounts.close();

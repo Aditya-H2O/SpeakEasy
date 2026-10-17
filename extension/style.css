@@ -309,3 +309,27 @@ body[data-view="room"] .top { max-width: 1200px; }
   .mic.attention, .btn.attention { animation: none; }
   .mic.attention { background: var(--accent-soft); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); }
 }
+
+/* account */
+.top-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+.account-chip { font-size: 0.85rem; display: inline-flex; gap: 6px; align-items: baseline; }
+.signin-card { max-width: 440px; margin-top: 16px; display: grid; gap: 10px; }
+.signin-card .card-head { margin-bottom: 0; }
+.signin-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.signin-form .btn, .signin-form #signin-invite { grid-column: 1 / -1; }
+@media (max-width: 420px) { .signin-form { grid-template-columns: 1fr; } }
+input[type="password"] { font: inherit; width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.acct { color: var(--live); font-weight: 700; margin-left: 4px; }
+
+/* Your own speaking habits: small and red, closable. */
+.toast.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); padding-block: 10px; }
+.toast.warn strong { color: var(--warn); }
+.toast.warn p { font-size: 0.85rem; }
+
+/* The host's AI summary, at the top of the transcript pane. */
+.summary-box { flex: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); display: grid; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.summary-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.summary-head .head-actions { margin-left: auto; }
+.summary-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.92rem; }
+.summary-text:empty { display: none; }
+#summary-status:empty { display: none; }

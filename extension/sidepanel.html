@@ -21,7 +21,13 @@
   <body>
     <header class="top">
       <a class="brand" href="sidepanel.html">Speak<span>Easy</span></a>
-      <a class="home" href="https://aditya-h.com/" target="_blank" rel="noopener">aditya-h.com</a>
+      <div class="top-right">
+        <span id="account-chip" class="account-chip" hidden>
+          <span class="muted">Signed in as</span> <b id="account-name"></b>
+          <button id="signout" class="link-btn">Sign out</button>
+        </span>
+        <a class="home" href="https://aditya-h.com/" target="_blank" rel="noopener">aditya-h.com</a>
+      </div>
     </header>
 
     <!-- Lobby: no room in the URL yet. -->
@@ -60,6 +66,29 @@
         <div><b>3.</b> Afterwards the host gets the transcript, with anything out of pocket flagged.</div>
       </section>
 
+      <!-- aditya-h.com's own visitor accounts: the same sign-in as Grounds
+           Guessr and VS. Optional: anyone can still join a meeting without. -->
+      <section id="signin-card" class="card signin-card" hidden>
+        <div class="card-head">
+          <h2 id="signin-title">Sign in</h2>
+          <span class="muted small-note">Optional</span>
+        </div>
+        <p class="muted small-note">
+          With an aditya-h.com account your notes and scheduled meetings are saved to it, so they follow you
+          to any device and into the extension. It's the same account as Grounds Guessr and VS.
+        </p>
+        <form id="signin-form" class="signin-form">
+          <input id="signin-user" autocomplete="username" placeholder="Username" aria-label="Username" required maxlength="40" />
+          <input id="signin-pass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required />
+          <input id="signin-invite" autocomplete="off" placeholder="Invite code" aria-label="Invite code" hidden />
+          <button id="signin-go" class="btn">Sign in</button>
+        </form>
+        <p class="small-note">
+          <button id="signin-toggle" type="button" class="link-btn">I have an invite code (make an account)</button>
+        </p>
+        <p id="signin-error" class="error" role="alert"></p>
+      </section>
+
       <div class="prep">
         <section class="card">
           <div class="card-head">
@@ -69,7 +98,7 @@
               <button id="plan-new" class="btn small">Schedule a meeting</button>
             </div>
           </div>
-          <p class="muted small-note">Plan ahead: give each meeting a to-do list and bring it in with you. Kept on this device only.</p>
+          <p class="muted small-note">Plan ahead: give each meeting a to-do list and bring it in with you. <span id="plan-where">Kept on this device only.</span></p>
           <div id="planner" class="planner"></div>
         </section>
         <div id="notes-slot-lobby"></div>
@@ -181,6 +210,20 @@
               <button id="transcript-download" class="btn small ghost" hidden>Download .txt</button>
             </div>
           </div>
+          <!-- Host only, once the meeting has ended. Made by Chrome's on-device
+               AI on the host's own computer (summarize.js). -->
+          <div id="summary-box" class="summary-box" hidden>
+            <div class="summary-head">
+              <strong>AI summary</strong>
+              <span class="muted small-note">made on your computer by Chrome; only you see it</span>
+              <div class="head-actions">
+                <button id="summary-copy" class="btn small ghost" hidden>Copy</button>
+                <button id="summary-run" class="btn small ghost">Summarize</button>
+              </div>
+            </div>
+            <p id="summary-status" class="muted small-note"></p>
+            <div id="summary-text" class="summary-text"></div>
+          </div>
           <p id="flag-summary" class="flag-summary" hidden></p>
           <ol id="transcript" class="transcript-list" aria-live="polite"></ol>
           <p id="transcript-empty" class="muted empty">What people say shows up here during the meeting.</p>
@@ -225,6 +268,7 @@
 
     <script src="transcribe.js"></script>
     <script src="personal.js"></script>
+    <script src="summarize.js"></script>
     <script src="config.js"></script>
     <script src="app.js"></script>
   </body>

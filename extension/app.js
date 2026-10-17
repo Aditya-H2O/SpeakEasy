@@ -95,6 +95,78 @@
   const meParticipant = () => S.snap && S.me && S.snap.participants.find((p) => p.id === S.me.id);
   const amHost = () => !!(meParticipant() || {}).host;
 
+  // -------------------------------------------------------------- account --
+  //
+  // aditya-h.com's visitor accounts (Grounds Guessr's, shared by VS): signing
+  // in here calls that app's own login, which sets the site-wide session
+  // cookie. SpeakEasy's server asks who that cookie is (api/me) and keeps your
+  // notes and scheduled meetings under that account. Optional throughout.
+
+  const SITE = CFG.site || ''; // the extension has to name the domain
+  const accountApi = (path, body) => fetch(`${SITE}/groundsguessr/api/auth/${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+    credentials: REMOTE ? 'include' : 'same-origin',
+  });
+
+  async function refreshMe() {
+    const r = await api('me').catch(() => null);
+    const ok = !!(r && r.ok);
+    const player = ok ? r.data.player : null;
+    S.player = player;
+    $('account-chip').hidden = !player;
+    if (player) $('account-name').textContent = player.username;
+    $('signin-card').hidden = !!player || !(ok && r.data.accounts);
+    if (player && !$('name').value) $('name').value = player.username;
+    await Personal.setAccount(player);
+  }
+
+  let registering = false;
+  $('signin-toggle').addEventListener('click', () => {
+    registering = !registering;
+    $('signin-invite').hidden = !registering;
+    $('signin-invite').required = registering;
+    $('signin-title').textContent = registering ? 'Make an account' : 'Sign in';
+    $('signin-go').textContent = registering ? 'Make my account' : 'Sign in';
+    $('signin-pass').autocomplete = registering ? 'new-password' : 'current-password';
+    $('signin-toggle').textContent = registering ? 'I already have an account' : 'I have an invite code (make an account)';
+    $('signin-error').textContent = '';
+  });
+
+  $('signin-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('signin-error').textContent = '';
+    $('signin-go').disabled = true;
+    try {
+      const body = { username: $('signin-user').value.trim(), password: $('signin-pass').value };
+      if (registering) body.inviteCode = $('signin-invite').value.trim();
+      const res = await accountApi(registering ? 'register' : 'login', body);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        $('signin-error').textContent = res.status === 429
+          ? 'Too many tries. Wait a minute and try again.'
+          : data.error || 'That did not work. Check the name and password.';
+        return;
+      }
+      $('signin-pass').value = '';
+      $('signin-invite').value = '';
+      await refreshMe();
+    } catch {
+      $('signin-error').textContent = 'Could not reach the sign-in service.';
+    } finally {
+      $('signin-go').disabled = false;
+    }
+  });
+
+  $('signout').addEventListener('click', async () => {
+    await accountApi('logout').catch(() => {});
+    await refreshMe();
+  });
+
+  // Signed in or out in another tab (or another app on the site): catch up.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshMe(); });
+
   // ---------------------------------------------------------------- lobby --
 
   async function initLobby(prefillCode, error) {
@@ -201,6 +273,7 @@
       const snap = JSON.parse(e.data);
       S.clockOffset = snap.serverNow - Date.now();
       S.snap = snap;
+      trackOthersSpeaking();
       syncMeeting();
       render();
     };
@@ -304,10 +377,103 @@
 
   $('stop').addEventListener('click', async () => {
     $('stop').disabled = true;
+    // Start Chrome's summarizer NOW, inside the click: the first time, it has
+    // to download its model, and Chrome only allows that during a gesture.
+    const summarizer = prepareSummarizer();
     const r = await api(`rooms/${S.code}/meeting`, { secret: S.me.secret, active: false });
     $('stop').disabled = false;
     $('meeting-error').textContent = r.ok ? '' : (r.data && r.data.error) || 'Could not end the meeting.';
+    if (r.ok) {
+      // The room's own "ended" update may not have arrived yet; we know it has.
+      if (S.snap && S.snap.meeting) S.snap.meeting.endedAt ||= serverNow();
+      render();
+      await loadTranscript();
+      summarizeMeeting(summarizer);
+    } else if (summarizer) {
+      summarizer.then((s) => s.destroy && s.destroy(), () => {});
+    }
   });
+
+  // ------------------------------------------------------------ AI summary --
+  //
+  // The host's own Chrome makes it, on-device (summarize.js): the transcript
+  // does not leave their computer for this, and the droplet does no work. The
+  // finished summary is saved with the room so a reload keeps it.
+
+  const Summ = window.SpeakEasySummarize;
+  S.summary = null;
+  S.summaryBusy = false;
+
+  const setSummaryStatus = (text) => { $('summary-status').textContent = text; };
+
+  function prepareSummarizer() {
+    if (!Summ.supported()) return null;
+    try {
+      const p = Summ.create((x) => setSummaryStatus(`Downloading Chrome’s on-device AI model (one time)… ${Math.round(x * 100)}%`));
+      p.catch(() => {}); // handled where it is awaited; this only silences "unhandled"
+      return p;
+    } catch { return null; }
+  }
+
+  async function summarizeMeeting(summarizerPromise) {
+    const m = S.snap && S.snap.meeting;
+    if (!amHost() || !m || !m.endedAt || S.summaryBusy) return;
+    if (!S.lines.length) { setSummaryStatus('Nothing was transcribed in this meeting, so there is nothing to summarize.'); return; }
+    if (!summarizerPromise) {
+      setSummaryStatus(Summ.supported()
+        ? 'Could not start Chrome’s on-device AI. Press Summarize to try again.'
+        : 'AI summaries need desktop Chrome with its built-in AI (Chrome 138 or newer, on a machine with about 16GB of RAM). The transcript download still works.');
+      return;
+    }
+    if ((await Summ.availability()) === 'unavailable') {
+      setSummaryStatus('This computer can’t run Chrome’s on-device AI (it needs desktop Chrome 138+, about 16GB of RAM and 22GB of free disk). The transcript download still works.');
+      summarizerPromise.then((s) => s.destroy && s.destroy(), () => {});
+      return;
+    }
+    S.summaryBusy = true;
+    $('summary-run').disabled = true;
+    let summarizer;
+    try {
+      setSummaryStatus('Getting Chrome’s on-device AI ready…');
+      summarizer = await summarizerPromise;
+      const lines = S.lines.map((l) => `${l.name}: ${l.text}`);
+      const text = await Summ.run(summarizer, lines, setSummaryStatus);
+      S.summary = { text, at: Date.now() };
+      setSummaryStatus('');
+      renderSummary();
+      await api(`rooms/${S.code}/transcript/summary`, { secret: S.me.secret, meetingId: m.id, text });
+    } catch (err) {
+      const name = err && err.name;
+      setSummaryStatus(
+        name === 'NotAllowedError'
+          ? 'Chrome needs a click to download its AI model. Press Summarize.'
+          : name === 'NotSupportedError' || name === 'InvalidStateError'
+            ? 'This computer can’t run Chrome’s on-device AI (it needs about 16GB of RAM and 22GB of free disk). The transcript download still works.'
+            : 'The summary failed: ' + ((err && err.message) || err) + '. Press Summarize to try again.',
+      );
+    } finally {
+      if (summarizer && summarizer.destroy) summarizer.destroy(); // frees the model's memory
+      S.summaryBusy = false;
+      $('summary-run').disabled = false;
+    }
+  }
+
+  $('summary-run').addEventListener('click', () => summarizeMeeting(prepareSummarizer()));
+  $('summary-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(S.summary.text); $('summary-copy').textContent = 'Copied'; } catch {}
+    setTimeout(() => ($('summary-copy').textContent = 'Copy'), 1600);
+  });
+
+  function renderSummary() {
+    const m = S.snap && S.snap.meeting;
+    const show = amHost() && !!m && !!m.endedAt;
+    $('summary-box').hidden = !show;
+    if (!show) return;
+    // textContent: model output is untrusted and is never parsed as markup.
+    $('summary-text').textContent = S.summary ? S.summary.text : '';
+    $('summary-copy').hidden = !S.summary;
+    $('summary-run').textContent = S.summary ? 'Summarize again' : 'Summarize';
+  }
 
   $('copy').addEventListener('click', async () => {
     const link = inviteLink(S.code);
@@ -413,7 +579,7 @@
   function toast(title, text, kind = 'info') {
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
-    el.setAttribute('role', kind === 'ping' || kind === 'nudge' ? 'alert' : 'status');
+    el.setAttribute('role', kind === 'ping' || kind === 'nudge' || kind === 'warn' ? 'alert' : 'status');
     const b = document.createElement('strong');
     b.textContent = title;
     const p = document.createElement('p');
@@ -449,6 +615,86 @@
         'nudge',
       );
     }
+  }
+
+  // ---- filler words: on YOUR screen, from YOUR transcript lines --------------
+  //
+  // Counted over your last ~150 words. Past 8 fillers per 100 words (and at
+  // least 6 of them), a small red card says so -- then the count starts over,
+  // and it stays quiet for three minutes whatever happens.
+  //
+  // Caveat worth knowing: Chrome's speech recognition mostly leaves "um" and
+  // "uh" OUT of what it writes, so this catches the spoken-word fillers ("like",
+  // "you know", "basically") far better than the hesitation sounds.
+  const FILLER = /\b(?:u+m+|u+h+|e+r+m+|hmm+|you know|i mean|basically|literally|kind of|sort of|like)\b/gi;
+  // "like" the verb or comparison, not the filler: "I like", "would like", "like to".
+  const LIKE_NOT_FILLER = /\b(?:i|you|we|they|he|she|would|'d|do|does|did|don't|didn't|really|also|look|looks|feel|feels|seem|seems|sound|sounds)\s+like$/i;
+  const fillerWindow = []; // [{ words, fillers: [] }]
+  let fillerQuietUntil = 0;
+
+  function noteFillers(text) {
+    const words = text.split(/\s+/).filter(Boolean).length;
+    const found = [];
+    for (const m of text.matchAll(FILLER)) {
+      const w = m[0].toLowerCase();
+      if (w === 'like') {
+        const before = text.slice(0, m.index + 4);
+        if (LIKE_NOT_FILLER.test(before) || /^like\s+(?:to|this|that|it)\b/i.test(text.slice(m.index))) continue;
+      }
+      found.push(/^u+m+$/.test(w) ? 'um' : /^u+h+$/.test(w) ? 'uh' : w);
+    }
+    fillerWindow.push({ words, fillers: found });
+    while (fillerWindow.reduce((a, x) => a + x.words, 0) - fillerWindow[0].words > 150) fillerWindow.shift();
+
+    const total = fillerWindow.reduce((a, x) => a + x.words, 0);
+    const all = fillerWindow.flatMap((x) => x.fillers);
+    if (Date.now() < fillerQuietUntil || total < 40 || all.length < 6 || all.length / total < 0.08) return;
+    const counts = {};
+    for (const f of all) counts[f] = (counts[f] || 0) + 1;
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([w, n]) => `“${w}” ×${n}`).join(', ');
+    toast('Lots of filler words', `In your last ${total} words: ${top}. A short pause works just as well.`, 'warn');
+    fillerWindow.length = 0;
+    fillerQuietUntil = Date.now() + 3 * 60e3;
+  }
+
+  // ---- interrupting: on YOUR screen, when YOU cut in ------------------------
+  //
+  // You start talking while someone else has already been talking for a
+  // second, and 1.2 seconds later you are both still going. Once a minute at
+  // most. Their speaking state comes from the room (up to a second behind),
+  // which is why the thresholds are not tighter. Without headphones, their
+  // voice coming out of your speakers can look like you talking over them.
+  const speakingSince = new Map(); // participant id -> when the room first showed them speaking
+  let cutIn = null; // { id, name, at } while we are deciding
+  let wasSpeaking = false;
+  let interruptQuietUntil = 0;
+
+  function trackOthersSpeaking() {
+    const t = Date.now();
+    for (const p of S.snap.participants) {
+      if (p.speaking && !p.away) { if (!speakingSince.has(p.id)) speakingSince.set(p.id, t); }
+      else speakingSince.delete(p.id);
+    }
+  }
+
+  function checkInterruption() {
+    const t = Date.now();
+    const me = S.vad.speaking && counting();
+    if (!me) { wasSpeaking = false; cutIn = null; return; }
+    const others = (S.snap ? S.snap.participants : []).filter((p) => p.id !== S.me.id && p.speaking && !p.away);
+    if (!wasSpeaking) {
+      wasSpeaking = true;
+      const victim = others.find((p) => t - (speakingSince.get(p.id) ?? t) >= 1000);
+      cutIn = victim ? { id: victim.id, name: victim.name, at: t } : null;
+      return;
+    }
+    if (!cutIn || t - cutIn.at < 1200) return;
+    const stillTalking = others.some((p) => p.id === cutIn.id);
+    if (stillTalking && t >= interruptQuietUntil) {
+      toast('You may have cut someone off', `You started talking while ${cutIn.name} was still speaking. Let them finish?`, 'warn');
+      interruptQuietUntil = t + 60e3;
+    }
+    cutIn = null;
   }
 
   const PING_LABELS = {
@@ -503,6 +749,7 @@
         // even through noise suppression, sits far above -110 dBFS; a muted
         // or dead input reads exactly zero, which is -200 here.
         if (e.data.levelDb > -110) S.heardAt = Date.now();
+        if (S.me && liveMeeting()) checkInterruption();
         renderMic();
         report(false); // the worklet is the one clock a background tab cannot slow down
       };
@@ -647,6 +894,7 @@
   async function sendLine({ text, startAt, endAt }) {
     const m = liveMeeting();
     if (!m || !S.me) return;
+    noteFillers(text);
     const body = {
       secret: S.me.secret,
       meetingId: m.id,
@@ -675,6 +923,7 @@
       S.lines = r.data.lines;
       S.hostView = 'flagged' in r.data;
       S.flagInfo = S.hostView ? { flagged: r.data.flagged, unchecked: r.data.unchecked } : null;
+      if (S.hostView && !S.summaryBusy) S.summary = r.data.summary || null;
       renderTranscript();
     } finally {
       loadingTranscript = false;
@@ -705,6 +954,7 @@
   }
 
   function renderTranscript() {
+    renderSummary();
     const list = $('transcript');
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
     const host = S.hostView;
@@ -766,6 +1016,7 @@
       `Started ${started.toLocaleString()}${m && m.endedAt ? `, ended ${new Date(m.endedAt).toLocaleString()}` : ''}`,
       `${S.lines.filter(isFlagged).length} line(s) flagged as out of pocket (marked ⚑)`,
       '',
+      ...(S.summary ? ['AI SUMMARY (made on-device by Chrome)', S.summary.text, '', 'TRANSCRIPT'] : []),
       ...S.lines.map((l) => `[${fmt(l.startMs)}] ${l.name}: ${l.text}${isFlagged(l) ? `   ⚑ ${flagWhy(l)}` : ''}`),
       '',
     ].join('\n');
@@ -806,6 +1057,7 @@
     $('start').textContent = m ? 'Start a new meeting' : 'Start meeting';
     $('stop').hidden = !host || !live;
     $('waiting').hidden = host || !!live;
+    renderSummary();
     $('waiting').textContent = m ? 'The meeting has ended.' : 'Waiting for the host to start the meeting.';
     if (!(Date.now() < armedUntil)) $('leave').textContent = leaveLabel();
 
@@ -841,6 +1093,7 @@
         const name = li.querySelector('.person-name');
         name.textContent = p.name; // textContent, never innerHTML: names come from strangers
         if (p.id === S.me.id) name.insertAdjacentHTML('beforeend', '<span class="you">you</span>');
+        if (p.account) name.insertAdjacentHTML('beforeend', '<span class="acct" title="Signed in to an aditya-h.com account">✓</span>');
         if (p.host) name.insertAdjacentHTML('beforeend', '<span class="tag">host</span>');
         if (tag) name.insertAdjacentHTML('beforeend', `<span class="tag">${tag}</span>`);
 
@@ -890,6 +1143,7 @@
   // ----------------------------------------------------------------- boot --
 
   Personal.init();
+  refreshMe();
   const code = (new URLSearchParams(location.search).get('r') || '').toUpperCase();
   if (/^[A-Z2-9]{8}$/.test(code)) {
     if (store.get('room:' + code) || store.get('name')) enter(code, store.get('name'));

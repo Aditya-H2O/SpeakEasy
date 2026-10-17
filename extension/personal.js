@@ -1,9 +1,15 @@
 /* GENERATED from web/ by scripts/build-extension.mjs -- edit the original. */
 // The things that are YOURS rather than the room's: notes you carry from
 // meeting to meeting, and meetings you have scheduled with a to-do list for
-// each. They live in this browser's storage (localStorage, so the same on the
-// website and, separately, in the extension) and never reach the server.
-// Export and import are plain .txt, one to-do per line.
+// each. Export and import are plain .txt, one to-do per line.
+//
+// Where they live depends on whether you are signed in:
+//  - signed in to an aditya-h.com account: on the server, under your account
+//    (api/me/data), so they follow you to any device and into the extension;
+//  - signed out: in this browser's localStorage, and nowhere else.
+// The first time you sign in, anything already in this browser moves up to
+// an account that has nothing yet. An account that already has data wins,
+// and this browser's copy is left alone, untouched, for when you sign out.
 //
 // app.js asks two things of this file: mount the cards where it wants them,
 // and tell it which scheduled meeting's to-dos to show in the room.
@@ -18,6 +24,108 @@
   const uid = () => Math.random().toString(36).slice(2, 10);
   const MAX_NOTES = 200_000;
   const MAX_TODOS = 200;
+
+  // ---- the account copy ---------------------------------------------------------
+
+  const CFG = window.SPEAKEASY || {};
+  const API = CFG.api || 'api/';
+  const REMOTE = !!CFG.api;
+  let account = null; // { id, username } while signed in
+  let version = 0; // the server copy's version we last saw
+  let syncTimer = null;
+  const savedText = () => (account ? `Saved to your account (${account.username})` : 'Saved on this device');
+  const showWhere = () => {
+    const el = $('plan-where');
+    if (el) el.textContent = account ? `Saved to your account (${account.username}).` : 'Kept on this device only. Sign in to keep them with your account.';
+  };
+
+  async function remote(body) {
+    const res = await fetch(API + 'me/data', {
+      method: body ? 'POST' : 'GET',
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      cache: 'no-store',
+      credentials: REMOTE ? 'include' : 'same-origin',
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  }
+
+  // Edits are gathered for a moment and sent as one whole copy, stamped with
+  // the version they were made on. Another device saved in between: the server
+  // refuses and hands back its copy, which we take, rather than overwrite it.
+  function markDirty() {
+    clearTimeout(syncTimer);
+    $('notes-saved').textContent = 'Saving…';
+    syncTimer = setTimeout(push, 800);
+  }
+
+  async function push() {
+    syncTimer = null;
+    if (!account) return;
+    try {
+      const r = await remote({ version, notes, plans, activePlan: activeId });
+      if (r.status === 200) {
+        version = r.data.version;
+        $('notes-saved').textContent = savedText();
+      } else if (r.status === 409) {
+        adopt(r.data);
+        $('notes-saved').textContent = 'Updated with changes made on another device.';
+      } else throw new Error(String(r.status));
+    } catch {
+      $('notes-saved').textContent = 'Could not save to your account; retrying…';
+      syncTimer = setTimeout(push, 5000);
+    }
+  }
+
+  function adopt(data) {
+    notes = data.notes || '';
+    plans = Array.isArray(data.plans) ? data.plans : [];
+    activeId = data.activePlan || null;
+    version = data.version || 0;
+    if (document.activeElement !== $('notes')) $('notes').value = notes;
+    listeners.forEach((f) => f());
+  }
+
+  // Called by app.js whenever who-you-are changes (or is first known).
+  async function setAccount(player) {
+    if ((player && player.id) === (account && account.id)) return;
+    clearTimeout(syncTimer);
+    syncTimer = null;
+    account = player || null;
+    showWhere();
+    if (!account) {
+      // Back to this browser's own copy.
+      adopt({ notes: load('notes', ''), plans: load('plans', []), activePlan: load('activePlan', null), version: 0 });
+      $('notes-saved').textContent = savedText();
+      return;
+    }
+    try {
+      const r = await remote();
+      if (r.status !== 200) throw new Error(String(r.status));
+      const local = { notes: load('notes', ''), plans: load('plans', []), activePlan: load('activePlan', null) };
+      if (r.data.version === 0 && (local.notes.trim() || local.plans.length)) {
+        // First sign-in on this browser, to a fresh account: bring it along.
+        adopt({ ...local, version: 0 });
+        await push();
+      } else {
+        adopt(r.data);
+      }
+      $('notes-saved').textContent = savedText();
+    } catch {
+      account = null;
+      showWhere();
+      $('notes-saved').textContent = 'Could not reach your account; showing this device\u2019s copy.';
+    }
+  }
+
+  // Pick up edits made on another device while this page sits open.
+  setInterval(async () => {
+    if (!account || syncTimer || document.activeElement === $('notes') || document.hidden) return;
+    try {
+      const r = await remote();
+      if (r.status === 200 && r.data.version > version) adopt(r.data);
+    } catch {}
+  }, 30000);
 
   // ---- files -----------------------------------------------------------------
 
@@ -57,17 +165,20 @@
     slot.append(card); // one card, moved between the lobby and the room
   }
 
+  let notes = load('notes', '');
+
   function initNotes() {
     const ta = $('notes');
-    ta.value = load('notes', '');
+    ta.value = notes;
     let t;
     ta.addEventListener('input', () => {
       clearTimeout(t);
       $('notes-saved').textContent = 'Saving…';
       t = setTimeout(() => {
         if (ta.value.length > MAX_NOTES) ta.value = ta.value.slice(0, MAX_NOTES);
-        save('notes', ta.value);
-        $('notes-saved').textContent = 'Saved on this device';
+        notes = ta.value;
+        if (account) markDirty();
+        else { save('notes', notes); $('notes-saved').textContent = savedText(); }
       }, 400);
     });
     $('notes-export').addEventListener('click', () => download(`speakeasy-notes-${stamp()}.txt`, ta.value));
@@ -87,7 +198,11 @@
   let plans = load('plans', []);
   let activeId = load('activePlan', null);
   const listeners = new Set();
-  const commit = () => { save('plans', plans); save('activePlan', activeId); listeners.forEach((f) => f()); };
+  const commit = () => {
+    if (account) markDirty();
+    else { save('plans', plans); save('activePlan', activeId); }
+    listeners.forEach((f) => f());
+  };
 
   const byWhen = (a, b) => (a.when || '9999').localeCompare(b.when || '9999');
   const fmtWhen = (w) => {
@@ -299,18 +414,21 @@
     renderRoomTodo();
   }
 
-  // Another tab or the extension changed the lists: pick that up.
+  // Another tab changed this browser's copy: pick that up (signed out only;
+  // signed in, the account copy is the one that matters).
   window.addEventListener('storage', (e) => {
+    if (account) return;
     if (e.key === KEY + 'plans' || e.key === KEY + 'activePlan') {
       plans = load('plans', []);
       activeId = load('activePlan', null);
       listeners.forEach((f) => f());
     }
-    if (e.key === KEY + 'notes' && document.activeElement !== $('notes')) $('notes').value = load('notes', '');
+    if (e.key === KEY + 'notes' && document.activeElement !== $('notes')) $('notes').value = notes = load('notes', '');
   });
 
   window.SpeakEasyPersonal = {
-    init() { initNotes(); initPlanner(); initRoomTodo(); },
+    init() { initNotes(); initPlanner(); initRoomTodo(); showWhere(); },
+    setAccount,
     mountNotes,
     download,
     safeName,

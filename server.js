@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { whoami, readData, writeData, accountsEnabled, DATA_LIMITS } from './accounts.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, 'web');
@@ -55,6 +56,8 @@ export const LIMITS = {
   lineGapMs: 300, // per participant: speech recognition never finishes lines faster
   moderationQueue: 200,
   maxMeetingMin: 480,
+  summaryChars: 12000, // the host's AI summary of one meeting
+  summaryBodyBytes: 16 * 1024, // the one request bigger than bodyBytes; nginx caps /speakeasy/ at 16k
 };
 
 // What counts as out of pocket. Each label is the model's probability for
@@ -78,7 +81,7 @@ export const PINGS = {
   thanks: 'Thanks, that was really helpful!',
 };
 
-const MODERATOR_URL =process.env.SPEAKEASY_MODERATOR_URL || 'http://127.0.0.1:3009';
+const MODERATOR_URL = process.env.SPEAKEASY_MODERATOR_URL || 'http://127.0.0.1:3009';
 
 const rooms = new Map();
 let dirty = false;
@@ -112,6 +115,7 @@ function newRoom() {
     participants: new Map(), // secret -> participant
     transcript: [], // { n, meetingId, pid, name, startMs, endMs, text, scores, flag }
     lineSeq: 0,
+    summaries: {}, // meeting id -> the host's on-device AI summary (summarize.js)
     streams: new Set(),
   };
   rooms.set(id, room);
@@ -141,6 +145,7 @@ function snapshot(room) {
       id: p.id,
       name: p.name,
       host: p.id === room.hostId,
+      account: !!p.accountId, // signed in to an aditya-h.com account
       speaking: p.speaking && t - p.seenAt < LIMITS.awayMs,
       away: t - p.seenAt >= LIMITS.awayMs,
       micOn: p.micOn,
@@ -243,7 +248,7 @@ export function leaveSoon(room, p) {
   }, LIMITS.leaveGraceMs).unref?.();
 }
 
-export function join(room, name, asHost = false) {
+export function join(room, name, asHost = false, account = null) {
   if (room.participants.size >= LIMITS.participantsPerRoom) return null;
   const p = {
     id: token(6),
@@ -256,6 +261,7 @@ export function join(room, name, asHost = false) {
     meetingId: null,
     ms: 0,
     reportedAt: now(),
+    accountId: account ? account.id : null,
   };
   room.participants.set(p.secret, p);
   if (asHost) room.hostId = p.id;
@@ -418,6 +424,7 @@ export function transcriptFor(room, asHost, meetingId) {
   return {
     meeting: m && m.id === id ? { id: m.id, startedAt: m.startedAt, endedAt: m.endedAt, plannedMs: m.plannedMs, thresholdPct: m.thresholdPct } : null,
     lines: lines.map(asHost ? hostLine : publicLine),
+    ...(asHost && { summary: (room.summaries || {})[id] || null }),
     ...(asHost && {
       flagged: lines.filter((l) => (l.override ?? !!l.flag)).length,
       unchecked: lines.filter((l) => !l.scores).length,
@@ -442,7 +449,7 @@ function save() {
   if (!STATE_FILE || !dirty) return;
   const data = [...rooms.values()].map((r) => ({
     id: r.id, createdAt: r.createdAt, touchedAt: r.touchedAt, meeting: r.meeting, hostId: r.hostId,
-    participants: [...r.participants.values()], transcript: r.transcript, lineSeq: r.lineSeq,
+    participants: [...r.participants.values()], transcript: r.transcript, lineSeq: r.lineSeq, summaries: r.summaries,
   }));
   const tmp = STATE_FILE + '.tmp';
   try {
@@ -466,6 +473,7 @@ function load() {
       ...r,
       transcript: r.transcript || [],
       lineSeq: r.lineSeq || 0,
+      summaries: r.summaries || {},
       participants: new Map(r.participants.map((p) => [p.secret, p])),
       streams: new Set(),
     };
@@ -496,13 +504,13 @@ function send(res, status, body, headers = {}) {
   res.end(json ? JSON.stringify(body) : body);
 }
 
-function readJson(req) {
+function readJson(req, limit = LIMITS.bodyBytes) {
   return new Promise((resolve) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > LIMITS.bodyBytes) { req.destroy(); resolve(null); } else chunks.push(c);
+      if (size > limit) { req.destroy(); resolve(null); } else chunks.push(c);
     });
     req.on('end', () => {
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { resolve(null); }
@@ -586,6 +594,25 @@ export async function handle(req, res) {
     return send(res, 200, { full: rooms.size >= LIMITS.rooms });
   }
 
+  // Your account, and the notes and scheduled meetings tied to it. Who you
+  // are comes from the site's shared visitor session (accounts.js); the data
+  // itself is only ever read or written by its owner.
+  if (parts[1] === 'me') {
+    const player = await whoami(req);
+    if (parts.length === 2 && req.method === 'GET') return send(res, 200, { player, accounts: accountsEnabled() });
+    if (parts[2] === 'data' && parts.length === 3) {
+      if (!player) return send(res, 401, { error: 'sign in first' });
+      if (req.method === 'GET') return send(res, 200, readData(player.id));
+      if (req.method === 'POST') {
+        const body = await readJson(req, DATA_LIMITS.bodyBytes);
+        if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
+        const r = writeData(player.id, body);
+        return send(res, r.status, r.error ? { error: r.error } : r.data);
+      }
+    }
+    return send(res, 404, { error: 'not found' });
+  }
+
   if (parts[1] !== 'rooms') return send(res, 404, { error: 'not found' });
 
   // Making a room joins you to it as its host, in one step, so there is never
@@ -601,7 +628,7 @@ export async function handle(req, res) {
           : 'Too many meetings are running right now.',
       });
     }
-    const p = join(room, body.name, true);
+    const p = join(room, body.name, true, await whoami(req));
     return send(res, 201, { room: room.id, id: p.id, secret: p.secret });
   }
 
@@ -617,11 +644,12 @@ export async function handle(req, res) {
   }
 
   if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
-  const body = await readJson(req);
+  const isSummary = action === 'transcript' && parts[4] === 'summary';
+  const body = await readJson(req, isSummary ? LIMITS.summaryBodyBytes : LIMITS.bodyBytes);
   if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
 
   if (action === 'join') {
-    const p = join(room, body.name);
+    const p = join(room, body.name, false, await whoami(req));
     if (!p) return send(res, 409, { error: 'room is full' });
     return send(res, 200, { id: p.id, secret: p.secret });
   }
@@ -676,6 +704,18 @@ export async function handle(req, res) {
     // A POST rather than a GET so the secret rides in the body, not in a URL
     // that nginx would write to its access log.
     if (sub === 'read') return send(res, 200, transcriptFor(room, isHost, body.meetingId));
+    // The host's browser made the summary (on-device AI, summarize.js) and
+    // keeps it with the room, so a reload or a second device of theirs can
+    // see it. Deleted with the room, like the transcript it summarizes.
+    if (sub === 'summary') {
+      if (!isHost) return send(res, 403, { error: 'only the host can save the summary' });
+      const m = room.meeting;
+      if (!m || body.meetingId !== m.id || !m.endedAt) return send(res, 409, { error: 'summaries are for an ended meeting' });
+      room.summaries = room.summaries || {};
+      room.summaries[m.id] = { text: String(body.text || '').slice(0, LIMITS.summaryChars), at: now() };
+      dirty = true;
+      return send(res, 200, { ok: true });
+    }
     if (sub === 'flag') {
       if (!isHost) return send(res, 403, { error: 'only the host can change flags' });
       if (!overrideFlag(room, Number(body.n), body.flagged)) return send(res, 404, { error: 'no such line' });
