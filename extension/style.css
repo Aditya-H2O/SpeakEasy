@@ -291,3 +291,21 @@ textarea { resize: vertical; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) { .toast, .dot.on { animation: none; } }
 
 body[data-view="room"] .top { max-width: 1200px; }
+
+/* No sound reaching us: the mic bar blinks until there is. */
+.mic-alert { margin: 10px 0 0; font-size: 0.9rem; font-weight: 600; color: var(--accent); }
+.mic.attention { border-color: var(--accent); animation: mic-blink 1.2s ease-in-out infinite; }
+.btn.attention { animation: mic-btn-blink 1.2s ease-in-out infinite; }
+@keyframes mic-blink {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); background: var(--surface); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+}
+@keyframes mic-btn-blink {
+  0%, 100% { filter: none; transform: none; }
+  50% { filter: brightness(1.2); transform: scale(1.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Still unmistakable, just not moving. */
+  .mic.attention, .btn.attention { animation: none; }
+  .mic.attention { background: var(--accent-soft); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); }
+}

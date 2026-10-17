@@ -127,7 +127,7 @@
       </section>
 
       <!-- Your mic, as a bar: it has to be there, but it is not what you watch. -->
-      <section class="card mic">
+      <section id="mic-card" class="card mic">
         <div class="mic-row">
           <strong>Your mic</strong>
           <span id="me-speaking" class="pill">off</span>
@@ -156,6 +156,10 @@
             </p>
           </details>
         </div>
+        <!-- Shown, and the bar blinks, whenever no sound is reaching SpeakEasy:
+             mic off, unplugged, or sending pure silence. "I'm muted" does not
+             hide it -- that only stops the counting. -->
+        <p id="mic-alert" class="mic-alert" role="status" hidden></p>
         <p id="mic-error" class="error" role="alert"></p>
       </section>
 

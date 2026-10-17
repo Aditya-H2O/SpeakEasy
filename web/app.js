@@ -463,10 +463,28 @@
       src.connect(hp).connect(lp).connect(node).connect(mute).connect(ctx.destination);
       node.port.onmessage = (e) => {
         S.vad = e.data;
+        // Anything above digital silence. A real mic in the quietest room,
+        // even through noise suppression, sits far above -110 dBFS; a muted
+        // or dead input reads exactly zero, which is -200 here.
+        if (e.data.levelDb > -110) S.heardAt = Date.now();
         renderMic();
         report(false); // the worklet is the one clock a background tab cannot slow down
       };
       S.audio = { ctx, stream, node };
+      S.heardAt = Date.now();
+      S.micLost = false;
+      // Unplugged, or taken by another app: drop back to "Turn on microphone"
+      // and say why. Muted at the OS or hardware: the bar starts blinking.
+      const track = stream.getAudioTracks()[0];
+      track.addEventListener('ended', () => {
+        if (!S.audio || S.audio.stream !== stream) return;
+        stopMic();
+        S.micLost = true;
+        renderMicHealth();
+        report(true);
+      });
+      track.addEventListener('mute', renderMicHealth);
+      track.addEventListener('unmute', renderMicHealth);
       post({ thresholdDb: S.threshold, reset: true, counting: counting() });
       // Starting the mic part way through a meeting: count from what we have.
       const mine = meParticipant();
@@ -505,6 +523,36 @@
   }
 
   $('mic').addEventListener('click', startMic);
+
+  // Is any sound reaching us at all? Deliberately blind to "I'm muted": that
+  // box pauses the counting, it does not excuse a dead mic, and someone who
+  // unmutes in the call should not discover only then that we hear nothing.
+  const SILENT_AFTER_MS = 6000;
+  function micHealth() {
+    if (!S.audio) return S.micLost ? 'lost' : 'off';
+    const track = S.audio.stream.getAudioTracks()[0];
+    if (!track || track.readyState === 'ended') return 'lost';
+    if (S.audio.ctx.state === 'suspended') { S.audio.ctx.resume().catch(() => {}); return 'silent'; }
+    if (track.muted || Date.now() - (S.heardAt || 0) > SILENT_AFTER_MS) return 'silent';
+    return 'ok';
+  }
+
+  const MIC_ALERT = {
+    off: 'Your mic is off, so SpeakEasy can’t count your talking or transcribe you. Turn it on, even if you’re muted in the call.',
+    lost: 'Your microphone was disconnected. Plug it back in or pick another, then turn it on again.',
+    silent: 'We’re not getting any sound from your mic. Check it isn’t muted on your computer or headset, and that the right input is selected.',
+  };
+
+  function renderMicHealth() {
+    if (!S.me) return;
+    const state = micHealth();
+    const bad = state !== 'ok';
+    $('mic-card').classList.toggle('attention', bad);
+    $('mic').classList.toggle('attention', bad && !S.audio);
+    $('mic').textContent = state === 'lost' ? 'Turn microphone back on' : 'Turn on microphone';
+    $('mic-alert').hidden = !bad;
+    if (bad) $('mic-alert').textContent = MIC_ALERT[state];
+  }
 
   $('sens').value = S.threshold;
   $('sens-out').textContent = `${S.threshold} dB`;
@@ -797,7 +845,11 @@
     checkNudge();
   }
   // While a ping menu is open, the list is not redrawn under the pointer.
-  setInterval(() => { if (S.snap && S.me) (S.audio && liveMeeting() && !S.pingOpen ? render : tickClock)(); }, 500);
+  setInterval(() => {
+    if (!S.me) return;
+    renderMicHealth();
+    if (S.snap) (S.audio && liveMeeting() && !S.pingOpen ? render : tickClock)();
+  }, 500);
 
   // ----------------------------------------------------------------- boot --
 
