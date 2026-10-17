@@ -43,8 +43,12 @@ function writeJson(file, value) {
  */
 export function archive(record) {
   if (!DIR || !isId(record.id)) return;
-  writeJson(meetingFile(record.id), record);
+  // Kept only if somebody may read it back. A meeting where nobody was signed
+  // in is not stored at all: a file nobody can open would just be everyone's
+  // words sitting on a disk for no one.
   const accounts = new Set([record.hostAccount, ...(record.attendees || [])].filter(isAccount));
+  if (!accounts.size) return;
+  writeJson(meetingFile(record.id), record);
   for (const account of accounts) {
     const list = readJson(indexFile(account), []);
     if (list.some((e) => e.id === record.id)) continue;
