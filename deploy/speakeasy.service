@@ -1,0 +1,38 @@
+[Unit]
+Description=SpeakEasy (plain Node, no dependencies)
+After=network.target
+
+# No RequiresMountsFor: the checkout is on ROOT at /opt/speakeasy, like Gate and
+# VIZ. It is a few dozen kilobytes with no node_modules and no build, so the
+# volume would buy nothing, and keeping it off the volume means it still runs
+# if the volume fails to attach.
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/speakeasy
+
+# Loopback only, like every other Node process on this box. nginx is the only
+# thing that should reach it. Port allocation as of 2026-10-17:
+#   3001 daycards   3002 (retired: clef)   3003 gate   3004 champpool
+#   3005 uvaguessr  3006 vs   3007 landing (not enabled)   3008 speakeasy
+Environment=HOST=127.0.0.1
+Environment=PORT=3008
+
+# Rooms live in memory and are snapshotted here every 15s and on SIGTERM, so a
+# deploy (`systemctl restart`) does not end a meeting in progress. Outside the
+# checkout so a `git pull` can never touch it. StateDirectory creates
+# /var/lib/speakeasy owned by www-data.
+StateDirectory=speakeasy
+Environment=SPEAKEASY_STATE_FILE=/var/lib/speakeasy/rooms.json
+
+# ~40MB resident. The ceiling is a guard on a 458MB box, not a tuning knob:
+# the app's own caps (200 rooms, 24 people each) keep it far below this.
+MemoryMax=96M
+
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

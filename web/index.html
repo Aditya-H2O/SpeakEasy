@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SpeakEasy</title>
+    <meta name="description" content="See how much of a meeting you are doing the talking." />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="./">Speak<span>Easy</span></a>
+      <a class="home" href="/">aditya-h.com</a>
+    </header>
+
+    <!-- Lobby: no room in the URL yet. -->
+    <main id="lobby" class="wrap" hidden>
+      <section class="hero">
+        <h1>Who's doing the talking?</h1>
+        <p class="lede">
+          Everyone in the meeting opens this page on their own laptop. Each one listens
+          only to its own microphone, works out when <em>its</em> person is speaking, and
+          the room adds it up, live.
+        </p>
+      </section>
+
+      <section class="card lobby-card">
+        <label class="field">
+          <span>Your name</span>
+          <input id="name" maxlength="40" autocomplete="nickname" placeholder="e.g. Aditya" />
+        </label>
+        <div class="lobby-actions">
+          <button id="create" class="btn primary">Start a new room</button>
+          <div class="or"><span>or join one</span></div>
+          <form id="join-form" class="join-row">
+            <input id="code" maxlength="8" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" />
+            <button class="btn">Join</button>
+          </form>
+        </div>
+        <p id="lobby-error" class="error" role="alert"></p>
+      </section>
+
+      <section class="how">
+        <div><b>1.</b> Start a room and send the link to everyone in the meeting.</div>
+        <div><b>2.</b> Each person turns on their mic here. Audio never leaves the laptop, only the totals do.</div>
+        <div><b>3.</b> Anyone can start and end the meeting. Everyone's clock runs only while it's on.</div>
+      </section>
+    </main>
+
+    <!-- Room -->
+    <main id="room" class="wrap" hidden>
+      <section class="room-head">
+        <div>
+          <div class="eyebrow">Room</div>
+          <div class="code-row">
+            <span id="room-code" class="code"></span>
+            <button id="copy" class="btn small ghost">Copy invite link</button>
+          </div>
+        </div>
+        <button id="leave" class="btn small ghost">Leave</button>
+      </section>
+
+      <section class="card meeting">
+        <div class="meeting-status">
+          <span id="meeting-dot" class="dot"></span>
+          <div>
+            <div id="meeting-label" class="meeting-label">No meeting yet</div>
+            <div id="meeting-clock" class="clock">0:00</div>
+          </div>
+        </div>
+        <button id="toggle" class="btn primary big">Start meeting</button>
+      </section>
+
+      <div class="grid">
+        <section class="card people">
+          <div class="card-head">
+            <h2>Talk time</h2>
+            <span id="people-count" class="muted"></span>
+          </div>
+          <ol id="people" class="people-list"></ol>
+          <p id="people-empty" class="muted empty">Totals appear once the meeting starts.</p>
+        </section>
+
+        <section class="card mic">
+          <div class="card-head">
+            <h2>Your mic</h2>
+            <span id="me-speaking" class="pill">off</span>
+          </div>
+
+          <button id="mic" class="btn primary">Turn on microphone</button>
+          <p id="mic-error" class="error" role="alert"></p>
+
+          <div id="mic-live" hidden>
+            <div class="meter" aria-hidden="true">
+              <div id="meter-fill" class="meter-fill"></div>
+              <div id="meter-floor" class="meter-mark floor" title="Background noise"></div>
+              <div id="meter-thresh" class="meter-mark thresh" title="Speaking threshold"></div>
+            </div>
+            <div class="meter-legend muted">
+              <span><i class="sw floor"></i>room noise</span>
+              <span><i class="sw thresh"></i>counts as speaking above this</span>
+            </div>
+
+            <label class="field slider">
+              <span>Sensitivity <output id="sens-out"></output></span>
+              <input id="sens" type="range" min="4" max="24" step="1" value="12" />
+              <small class="muted">Further right = needs to be louder. Raise it if other people's voices are being counted as yours.</small>
+            </label>
+
+            <label class="check">
+              <input id="paused" type="checkbox" />
+              <span>I'm muted in the call — don't count me</span>
+            </label>
+          </div>
+
+          <p class="tip">
+            <b>Wear headphones.</b> If the meeting plays out of your laptop speakers, your mic hears
+            everyone else too and will count some of their talking as yours.
+          </p>
+        </section>
+      </div>
+    </main>
+
+    <main id="gone" class="wrap" hidden>
+      <section class="card center">
+        <h1>That room is gone</h1>
+        <p class="muted">Rooms close after twelve hours with nobody in them.</p>
+        <a class="btn primary" href="./">Start a new one</a>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
