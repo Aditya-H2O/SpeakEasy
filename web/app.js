@@ -77,6 +77,9 @@
     meetingId: null, // the meeting the worklet's counter belongs to
     baseMs: 0, // what the server already had for us when the counter was reset
     lastReport: 0,
+    interim: null, // { text, startAt }: my words still being spoken (transcribe.js)
+    interimSent: '', // the interim text the server last heard from me
+    interims: new Map(), // pid -> { name, text, startMs, at }: everyone's words in progress
     lastSpeaking: false,
     reporting: false,
     // transcript
@@ -226,6 +229,7 @@
     S.code = code;
     S.me = me;
     S.lines = [];
+    S.interims.clear();
     history.replaceState(null, '', '?r=' + code);
     $('room-code').textContent = code;
     Personal.mountNotes($('notes-slot-room'));
@@ -280,7 +284,16 @@
       const m = S.snap && S.snap.meeting;
       if (!m || line.meetingId !== m.id || S.lines.some((l) => l.n === line.n)) return;
       S.lines.push(line);
+      S.interims.delete(line.pid); // the finished line replaces the words in progress
       renderTranscript();
+    });
+    // Someone's words as they say them, before the line is finished.
+    es.addEventListener('interim', (e) => {
+      const it = JSON.parse(e.data);
+      if (S.me && it.pid === S.me.id) return; // my own are drawn straight from my recogniser
+      if (it.text) S.interims.set(it.pid, { name: it.name, text: it.text, startMs: it.startMs, at: Date.now() });
+      else S.interims.delete(it.pid);
+      renderInterims();
     });
     // The server closed the room: the host left, everyone left, or it was abandoned.
     es.addEventListener('closed', (e) => {
@@ -305,7 +318,10 @@
     const m = liveMeeting();
     const id = m ? m.id : null;
     const latest = S.snap.meeting ? S.snap.meeting.id : null;
-    if (latest !== S.transcriptOf) { S.transcriptOf = latest; S.lines = []; loadTranscript(); }
+    if (latest !== S.transcriptOf) { S.transcriptOf = latest; S.lines = []; S.interims.clear(); loadTranscript(); }
+    // Ended or paused: nobody is mid-sentence any more.
+    if ((!m || isPaused()) && S.interims.size) { S.interims.clear(); renderInterims(); }
+    else if (S.interims.size) renderInterims(); // lets a stale guess expire
     if (id !== S.meetingId) {
       S.meetingId = id;
       const mine = meParticipant();
@@ -332,7 +348,13 @@
     // seconds, not one, because every request through the site also costs a
     // Gate check: a full meeting reporting every second was enough to fill
     // the droplet's connection-tracking table (see README, "Stress test").
-    if (!force && !(t - S.lastReport >= 2000 || (flipped && t - S.lastReport >= 500))) return;
+    // Words in progress also ride on the report, a second sooner while they
+    // are changing: once a second for whoever is mid-sentence, rather than a
+    // request of their own for every guess.
+    const interimText = (S.interim && S.interim.text) || '';
+    const interimNew = interimText !== S.interimSent;
+    if (!force && !(t - S.lastReport >= 2000 || (flipped && t - S.lastReport >= 500) || (interimNew && t - S.lastReport >= 1000))) return;
+    S.interimSent = interimText;
     S.lastReport = t;
     S.lastSpeaking = speaking;
     S.reporting = true;
@@ -345,6 +367,9 @@
         transcribing: ['on-device', 'cloud'].includes(S.sttState),
         meetingId: S.meetingId,
         ms: Math.round(myMs()),
+        interim: interimText && S.snap && S.snap.meeting
+          ? { text: interimText, startMs: S.interim.startAt + S.clockOffset - S.snap.meeting.startedAt }
+          : null,
       });
       if (r.status === 403) await rejoin();
       else if (r.status === 404) roomGone();
@@ -899,7 +924,23 @@
     }
     if (!S.stt) {
       S.stt = new Transcriber({
-        onLine: sendLine,
+        onLine: (line) => {
+          S.interim = null;
+          if (S.me) S.interims.delete(S.me.id);
+          renderInterims();
+          sendLine(line);
+        },
+        onInterim: (interim) => {
+          S.interim = interim;
+          const m = liveMeeting();
+          if (S.me && interim && m) {
+            S.interims.set(S.me.id, { name: (meParticipant() || {}).name || '', text: interim.text, startMs: interim.startAt + S.clockOffset - m.startedAt, at: Date.now() });
+          } else if (S.me) {
+            S.interims.delete(S.me.id);
+          }
+          renderInterims();
+          report(false);
+        },
         onState: (state, detail) => {
           S.sttState = state;
           $('stt-state').textContent = state === 'error' ? detail : STT_TEXT[state] || '';
@@ -1023,9 +1064,39 @@
       }
       return li;
     }));
-    if (nearBottom) list.scrollTop = list.scrollHeight;
+    renderInterims(nearBottom);
   }
   $('flag-filter').addEventListener('change', renderTranscript);
+
+  // Words in progress, greyed, after the finished lines: one per person who is
+  // mid-sentence. Redrawn on their own, often, so the (possibly long) list of
+  // finished lines is not rebuilt for every guess. A guess nobody has updated
+  // in 10s is dropped (a page that vanished mid-sentence).
+  function renderInterims(stick) {
+    const list = $('transcript');
+    const nearBottom = stick ?? list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    for (const el of list.querySelectorAll('.line.interim')) el.remove();
+    const t = Date.now();
+    for (const [pid, it] of S.interims) if (t - it.at > 10000) S.interims.delete(pid);
+    if (!S.hostView || !$('flag-filter').checked) {
+      for (const [pid, it] of [...S.interims].sort((a, b) => a[1].startMs - b[1].startMs)) {
+        const li = document.createElement('li');
+        li.className = 'line interim' + (S.me && pid === S.me.id ? ' mine' : '');
+        const time = document.createElement('time');
+        time.textContent = fmt(it.startMs);
+        const who = document.createElement('span');
+        who.className = 'line-who';
+        who.textContent = it.name;
+        const text = document.createElement('span');
+        text.className = 'line-text';
+        text.textContent = it.text + ' …'; // textContent: it comes from other people's browsers
+        li.append(time, who, text);
+        list.append(li);
+      }
+    }
+    if (S.interims.size) $('transcript-empty').hidden = true;
+    if (nearBottom) list.scrollTop = list.scrollHeight;
+  }
 
   $('transcript-download').addEventListener('click', () => {
     const m = S.snap && S.snap.meeting;

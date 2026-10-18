@@ -270,6 +270,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .line-meta { grid-column: 2; display: flex; gap: 10px; align-items: center; font-size: 0.8rem; margin-top: 2px; }
 .line.flagged { background: color-mix(in srgb, var(--warn) 12%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
 .line .why { color: var(--warn); font-weight: 600; }
+.line.interim .line-text { color: var(--muted); font-style: italic; }
 .flag-summary { margin: -4px 0 10px; font-size: 0.85rem; color: var(--muted); flex: none; }
 .flag-summary.has-flags { color: var(--warn); font-weight: 600; }
 

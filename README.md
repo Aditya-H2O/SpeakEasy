@@ -28,7 +28,11 @@ the transcript in its own scrolling pane; one column on narrow screens):
   what you're saying, for the sake of time.", short on time, can't hear you,
   background noise, thanks). Only the recipient sees it.
 - **Transcript.** Every line has the speaker and a timestamp from the meeting's
-  start. Everyone sees it as it is written.
+  start. Everyone sees it as it is written. Words still being spoken show up live, greyed, about
+  a second behind the speaker, and are replaced by the finished line when the
+  sentence ends. They ride on the talk-time report each page already sends
+  (once a second while someone is mid-sentence, instead of every two), so they
+  cost the site no extra requests per word.
 - **Out-of-pocket flags.** Each line is scored by the moderator. Flags are shown
   **to the host only**, with the reason (insult, threat, obscene, ...). The host
   can unflag a line the model got wrong or flag one it missed, filter to flagged
@@ -199,8 +203,8 @@ are JSON, capped at 4KB.
 | `POST rooms {name}` | create and join as host → `{room, id, secret}` (409 if one is running) |
 | `POST rooms/:code/join {name}` | → `{id, secret}` |
 | `GET rooms/:code` | snapshot |
-| `GET rooms/:code/events` | SSE: snapshots; `line` (new transcript line); `closed` |
-| `POST rooms/:code/report {secret, speaking, micOn, micLive, transcribing, meetingId, ms}` | → `{pings}` addressed to you |
+| `GET rooms/:code/events` | SSE: snapshots; `line` (new transcript line); `interim` (words in progress); `closed` |
+| `POST rooms/:code/report {secret, speaking, micOn, micLive, transcribing, meetingId, ms, interim}` | → `{pings}` addressed to you; `interim {text, startMs}` is your words in progress, sent out as an SSE `interim` event |
 | `POST rooms/:code/meeting {secret, active, durationMin, thresholdPct}` | host only; plan required to start |
 | `POST rooms/:code/ping {secret, to, kind}` | host only, during a meeting |
 | `POST rooms/:code/pause {secret, paused}` | host only; pause or resume |

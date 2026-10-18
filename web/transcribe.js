@@ -26,11 +26,14 @@
      * @param {object} o
      * @param {(line: {text: string, startAt: number, endAt: number}) => void} o.onLine
      *   one finished utterance, with wall-clock times (Date.now()) for its start and end
+     * @param {(interim: {text: string, startAt: number} | null) => void} [o.onInterim]
+     *   the words of the utterance still being spoken, as they firm up; null once it is done
      * @param {(state: string, detail?: string) => void} o.onState
      *   'off' | 'starting' | 'on-device' | 'cloud' | 'error'
      */
-    constructor({ onLine, onState, lang }) {
+    constructor({ onLine, onInterim, onState, lang }) {
       this.onLine = onLine;
+      this.onInterim = onInterim || (() => {});
       this.onState = onState;
       this.lang = lang || navigator.language || 'en-US';
       this.want = false;
@@ -63,6 +66,7 @@
       this.want = false;
       if (this.rec) { try { this.rec.abort(); } catch {} }
       this.rec = null;
+      this.onInterim(null);
       this.onState('off');
     }
 
@@ -90,7 +94,7 @@
       const rec = new SR();
       rec.lang = this.lang;
       rec.continuous = true;
-      rec.interimResults = true; // only to learn when an utterance STARTED
+      rec.interimResults = true; // the words as they are spoken, before the line is final
       if (this.mode === 'on-device' && 'processLocally' in rec) rec.processLocally = true;
 
       rec.onstart = () => { rec.startedAt = Date.now(); this.onState(this.mode); };
@@ -98,6 +102,7 @@
         // Words came back: the service works, so failures so far were blips.
         this.restarts = 0;
         this.networkFails = 0;
+        let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const r = e.results[i];
           this.uttStart ??= Date.now();
@@ -105,8 +110,12 @@
             const text = r[0].transcript.trim();
             if (text) this.onLine({ text, startAt: this.uttStart, endAt: Date.now() });
             this.uttStart = null;
+          } else {
+            interim += r[0].transcript;
           }
         }
+        interim = interim.trim();
+        this.onInterim(interim ? { text: interim, startAt: this.uttStart ?? Date.now() } : null);
       };
       rec.onerror = (e) => {
         // 'no-speech' and 'aborted' are routine; onend restarts.
@@ -131,6 +140,7 @@
       rec.onend = () => {
         this.rec = null;
         this.uttStart = null;
+        this.onInterim(null);
         if (!this.want) return;
         // A session that ran a while (Chrome's silence timeout) is no failure.
         if (rec.startedAt && Date.now() - rec.startedAt > 5000) this.restarts = 0;

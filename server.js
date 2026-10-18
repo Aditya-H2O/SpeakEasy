@@ -336,6 +336,7 @@ export function report(room, p, body) {
     }
   }
   p.reportedAt = t;
+  setInterim(room, p, live ? body.interim : null);
   changed(room);
 }
 
@@ -450,6 +451,26 @@ const cleanText = (s) => String(s ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').
 const publicLine = (l) => ({ n: l.n, meetingId: l.meetingId, pid: l.pid, name: l.name, startMs: l.startMs, endMs: l.endMs, text: l.text });
 const hostLine = (l) => ({ ...publicLine(l), scores: l.scores, flag: l.flag, checked: !!l.scores, override: l.override ?? null });
 
+// Words still being spoken: speech recognition's interim guess at what this
+// person is saying, before it settles on a finished line. It rides on the
+// report the page sends anyway (a second request per guess would cost the site
+// a Gate check each; see README, "Stress test"), goes straight out to
+// everyone, and is never stored, moderated or saved: the finished line that
+// replaces it is. One per person; the line event clears it on every page.
+function setInterim(room, p, interim) {
+  const interims = room.interims || (room.interims = new Map()); // not persisted
+  const text = interim && typeof interim === 'object' ? cleanText(interim.text) : '';
+  const had = interims.get(p.id);
+  if ((had ? had.text : '') === text) return;
+  const m = room.meeting;
+  const elapsed = m ? now() - m.startedAt : 0;
+  const startMs = Math.max(0, Math.min(Math.round(Number(text && interim.startMs) || elapsed), elapsed));
+  if (text) interims.set(p.id, { text, startMs });
+  else interims.delete(p.id);
+  const data = `event: interim\ndata: ${JSON.stringify({ pid: p.id, name: p.name, text, startMs })}\n\n`;
+  for (const res of room.streams) res.write(data);
+}
+
 export function addLine(room, p, body) {
   const t = now();
   const m = room.meeting;
@@ -475,6 +496,7 @@ export function addLine(room, p, body) {
   };
   p.lineAt = t;
   p.seenAt = t;
+  if (room.interims) room.interims.delete(p.id); // pages drop it on the line event
   room.transcript.push(line);
   const data = `event: line\ndata: ${JSON.stringify(publicLine(line))}\n\n`;
   for (const res of room.streams) res.write(data);

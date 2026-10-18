@@ -365,6 +365,28 @@ const streamUntilClosed = async (code, act) => {
   return { out, buf };
 };
 
+await t('words in progress ride on the report and go out live, once per change', async () => {
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  // Before the meeting, an interim goes nowhere.
+  const { out, buf } = await streamUntilClosed(h.room, async () => {
+    await post(`/api/rooms/${h.room}/report`, { secret: g.secret, interim: { text: 'too early' } });
+    await post(`/api/rooms/${h.room}/meeting`, { secret: h.secret, active: true, ...PLAN });
+    const mid = (await get(`/api/rooms/${h.room}`)).data.meeting.id;
+    const say = (text) => post(`/api/rooms/${h.room}/report`, { secret: g.secret, meetingId: mid, interim: text && { text, startMs: 0 } });
+    await say('so I was');
+    await say('so I was');
+    await say('so I was thinking');
+    await sleep(LIMITS.lineGapMs + 20);
+    await post(`/api/rooms/${h.room}/transcript`, { secret: g.secret, meetingId: mid, text: 'So I was thinking.', startMs: 0, endMs: 10 });
+    await say(null); // already cleared by the line: nothing more to send
+    return post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
+  });
+  assert.equal(out.data.closed, true);
+  const interims = buf.split('\n\n').filter((e) => e.startsWith('event: interim')).map((e) => JSON.parse(e.split('data: ')[1]).text);
+  assert.deepEqual(interims, ['so I was', 'so I was thinking']);
+});
+
 await t('the host leaving closes the room for everyone still in it', async () => {
   const h = (await post('/api/rooms', { name: 'Host' })).data;
   const c = (await post(`/api/rooms/${h.room}/join`, { name: 'Cy' })).data;
