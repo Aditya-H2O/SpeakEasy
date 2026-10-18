@@ -285,7 +285,7 @@
       const line = JSON.parse(e.data);
       const m = S.snap && S.snap.meeting;
       if (!m || line.meetingId !== m.id || S.lines.some((l) => l.n === line.n)) return;
-      S.lines.push(line);
+      placeLine(line);
       S.interims.delete(line.pid); // the finished line replaces the words in progress
       renderTranscript();
     });
@@ -293,7 +293,7 @@
       const line = JSON.parse(e.data);
       if (line.meetingId !== S.snap?.meeting?.id) return;
       const i = S.lines.findIndex((l) => l.n === line.n);
-      if (i < 0) S.lines.push(line);
+      if (i < 0) placeLine(line);
       else S.lines[i] = line;
       renderTranscript();
     });
@@ -775,6 +775,8 @@
       const mute = new GainNode(ctx, { gain: 0 });
       src.connect(hp).connect(lp).connect(node).connect(mute).connect(ctx.destination);
       node.port.onmessage = (e) => {
+        // Speech began about one attack (60ms) and one post (100ms) ago.
+        if (e.data.speaking && !S.vad.speaking) S.voiceSince = Date.now() - 160;
         S.vad = e.data;
         // Anything above digital silence. A real mic in the quietest room,
         // even through noise suppression, sits far above -110 dBFS; a muted
@@ -911,6 +913,7 @@
     }
     if (!S.stt) {
       S.stt = new Transcriber({
+        voiceStart: () => S.voiceSince || null,
         onLine: (line) => {
           S.interim = null;
           if (S.me) S.interims.delete(S.me.id);
@@ -997,7 +1000,7 @@
       if (!r.ok) return;
       const m = S.snap && S.snap.meeting;
       if (r.data.meeting && m && r.data.meeting.id !== m.id) return; // raced a new meeting
-      S.lines = r.data.lines;
+      S.lines = r.data.lines.sort(byTime); // the server sorts too; an older one did not
       S.hostView = !!r.data.canModerate;
       S.flagInfo = { flagged: r.data.flagged, unchecked: r.data.unchecked };
       if (S.hostView && !S.summaryBusy) S.summary = r.data.summary || null;
@@ -1011,6 +1014,16 @@
     // has not reached yet.
     if (S.me && (liveMeeting() || (S.flagInfo && S.flagInfo.unchecked))) loadTranscript();
   }, 4000);
+
+  // The transcript is in the order things were SAID. A line arrives when its
+  // speaker's recognizer finishes it, so a long sentence begun first can arrive
+  // after a short one begun later; it goes in by its start time, not at the end.
+  const byTime = (a, b) => a.startMs - b.startMs || a.n - b.n;
+  function placeLine(line) {
+    let i = S.lines.length;
+    while (i > 0 && byTime(S.lines[i - 1], line) > 0) i--;
+    S.lines.splice(i, 0, line);
+  }
 
   const isFlagged = (l) => (l.override ?? !!l.flag);
   const LABEL_TEXT = { toxic: 'toxic', severe_toxic: 'severely toxic', obscene: 'obscene', threat: 'threat', insult: 'insult', identity_hate: 'identity hate' };
@@ -1057,6 +1070,7 @@
     list.replaceChildren(...lines.map((l) => {
       const li = document.createElement('li');
       li.className = 'line' + (S.me && l.pid === S.me.id ? ' mine' : '') + (isFlagged(l) ? ' flagged' : '');
+      li.dataset.startMs = l.startMs;
       const time = document.createElement('time');
       time.textContent = fmt(l.startMs);
       const who = document.createElement('span');
@@ -1087,10 +1101,11 @@
   }
   $('flag-filter').addEventListener('change', renderTranscript);
 
-  // Words in progress, greyed, after the finished lines: one per person who is
-  // mid-sentence. Redrawn on their own, often, so the (possibly long) list of
-  // finished lines is not rebuilt for every guess. A guess nobody has updated
-  // in 10s is dropped (a page that vanished mid-sentence).
+  // Words in progress, greyed, in their place in time among the finished lines:
+  // one per person who is mid-sentence. Redrawn on their own, often, so the
+  // (possibly long) list of finished lines is not rebuilt for every guess. A
+  // guess nobody has updated in 10s is dropped (a page that vanished
+  // mid-sentence).
   function renderInterims(stick) {
     const list = $('transcript');
     const nearBottom = stick ?? list.scrollHeight - list.scrollTop - list.clientHeight < 40;
@@ -1101,6 +1116,7 @@
       for (const [pid, it] of [...S.interims].sort((a, b) => a[1].startMs - b[1].startMs)) {
         const li = document.createElement('li');
         li.className = 'line interim' + (S.me && pid === S.me.id ? ' mine' : '');
+        li.dataset.startMs = it.startMs;
         const time = document.createElement('time');
         time.textContent = fmt(it.startMs);
         const who = document.createElement('span');
@@ -1110,7 +1126,8 @@
         text.className = 'line-text';
         text.textContent = it.text + ' …'; // textContent: it comes from other people's browsers
         li.append(time, who, text);
-        list.append(li);
+        const after = [...list.children].find((el) => Number(el.dataset.startMs) > it.startMs);
+        list.insertBefore(li, after || null);
       }
     }
     if (S.interims.size) $('transcript-empty').hidden = true;

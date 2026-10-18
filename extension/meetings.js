@@ -81,6 +81,7 @@
     const r = await call(`me/meetings/${encodeURIComponent(id)}`).catch(() => null);
     if (!r || !r.ok) return loadPage();
     open = r.data;
+    open.lines.sort((a, b) => a.startMs - b.startMs); // in the order said; older archives are not
     const m = open;
     $('history-browse').hidden = true;
     $('history-view').hidden = false;

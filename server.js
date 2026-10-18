@@ -448,7 +448,7 @@ export function archiveMeeting(room, meetingId) {
       attendees: (room.attendees || {})[m.id] || [],
       people,
       summary: (room.summaries || {})[m.id] || null,
-      lines: room.transcript.filter((l) => l.meetingId === m.id).map((l) => ({
+      lines: meetingLines(room, m.id).map((l) => ({
         startMs: l.startMs, name: l.name, text: l.text, flag: l.flag, override: l.override ?? null,
       })),
     });
@@ -467,6 +467,13 @@ function scheduleArchive(room, meetingId) {
 }
 
 // ---- transcript -----------------------------------------------------------
+
+// One meeting's lines in the order they were SAID, not the order they arrived.
+// A line is posted when the speaker's recognizer finishes it, so a long sentence
+// begun first can land after a short one begun later. startMs is relative to
+// the meeting's start, which is why this only ever sorts within one meeting.
+const byTime = (a, b) => a.startMs - b.startMs || a.n - b.n;
+const meetingLines = (room, id) => room.transcript.filter((l) => l.meetingId === id).sort(byTime);
 
 const cleanText = (s) => String(s ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, LIMITS.lineChars);
 
@@ -593,7 +600,7 @@ async function pumpModeration() {
 export function transcriptFor(room, asHost, meetingId) {
   const m = room.meeting;
   const id = meetingId || (m && m.id);
-  const lines = room.transcript.filter((l) => l.meetingId === id);
+  const lines = meetingLines(room, id);
   return {
     meeting: m && m.id === id ? { id: m.id, startedAt: m.startedAt, endedAt: m.endedAt, plannedMs: m.plannedMs, thresholdPct: m.thresholdPct } : null,
     lines: lines.map(hostLine),

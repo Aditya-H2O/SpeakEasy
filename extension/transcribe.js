@@ -31,9 +31,13 @@
      *   the words of the utterance still being spoken, as they firm up; null once it is done
      * @param {(state: string, detail?: string) => void} o.onState
      *   'off' | 'starting' | 'on-device' | 'cloud' | 'error'
+     * @param {() => number | null} [o.voiceStart]
+     *   when the voice detector last heard speech begin (Date.now()), if it knows
      */
-    constructor({ onLine, onInterim, onState, lang }) {
+    constructor({ onLine, onInterim, onState, lang, voiceStart }) {
       this.onLine = onLine;
+      this.voiceStart = voiceStart || (() => null);
+      this.lastEndAt = 0;
       this.onInterim = onInterim || (() => {});
       this.onState = onState;
       this.lang = lang || navigator.language || 'en-US';
@@ -91,6 +95,18 @@
       return 'cloud';
     }
 
+    // When this utterance really began. The recognizer's first words come back
+    // a second or so after the voice does, and the transcript is ordered by
+    // start time, so that lag would put this line after someone who answered
+    // quickly. The voice detector heard the start; trust it for a burst of
+    // speech that began recently, but never before the last line ended.
+    speechBegan() {
+      const now = Date.now();
+      const v = this.voiceStart();
+      if (!v || now - v > 10000) return now;
+      return Math.min(now, Math.max(v, this.lastEndAt));
+    }
+
     spawn() {
       const rec = new SR();
       rec.lang = this.lang;
@@ -106,10 +122,11 @@
         let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const r = e.results[i];
-          this.uttStart ??= Date.now();
+          this.uttStart ??= this.speechBegan();
           if (r.isFinal) {
             const text = r[0].transcript.trim();
-            if (text) this.onLine({ text, startAt: this.uttStart, endAt: Date.now() });
+            this.lastEndAt = Date.now();
+            if (text) this.onLine({ text, startAt: this.uttStart, endAt: this.lastEndAt });
             this.uttStart = null;
           } else {
             interim += r[0].transcript;

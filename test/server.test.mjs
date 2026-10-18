@@ -445,6 +445,27 @@ await t('words in progress ride on the report and go out live, once per change',
   assert.deepEqual(interims, ['so I was', 'so I was thinking']);
 });
 
+await t('the transcript is in the order things were said, not the order they arrived', async () => {
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  try {
+    await post(`/api/rooms/${h.room}/meeting`, { secret: h.secret, active: true, ...PLAN });
+    const mid = (await get(`/api/rooms/${h.room}`)).data.meeting.id;
+    await sleep(500); // start times are clamped to the time elapsed
+    const line = (who, text, startMs, endMs) => post(`/api/rooms/${h.room}/transcript`, { secret: who.secret, meetingId: mid, text, startMs, endMs });
+    // The guest's quick reply finishes first; the host's long sentence, begun
+    // earlier, arrives after it. Then a line begun before either.
+    assert.equal((await line(g, 'Sure.', 300, 350)).status, 200);
+    assert.equal((await line(h, 'So the plan for this week is', 100, 450)).status, 200);
+    await sleep(LIMITS.lineGapMs + 20);
+    assert.equal((await line(g, 'Hello?', 50, 90)).status, 200);
+    const read = (await post(`/api/rooms/${h.room}/transcript/read`, { secret: g.secret })).data;
+    assert.deepEqual(read.lines.map((l) => l.text), ['Hello?', 'So the plan for this week is', 'Sure.']);
+  } finally {
+    await post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
+  }
+});
+
 await t('the host leaving closes the room for everyone still in it', async () => {
   const h = (await post('/api/rooms', { name: 'Host' })).data;
   const c = (await post(`/api/rooms/${h.room}/join`, { name: 'Cy' })).data;
