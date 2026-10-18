@@ -1,7 +1,7 @@
 // Meeting history, at the bottom of the home page: your past meetings, ten to
 // a page with Newer/Older buttons (deliberately pages, not an endless scroll),
 // and any one of them opened up -- summary, who talked how much, the whole
-// transcript, a .txt download. The host's own meetings show their flags too.
+// transcript, a .txt download. Everyone sees the flags and their reasons too.
 //
 // History belongs to accounts (history.js on the server), so signed out this
 // is only an invitation to sign in.
@@ -100,17 +100,17 @@
       el('strong', { textContent: total ? `${Math.round((p.ms / total) * 100)}%` : '–' }),
     )));
 
-    const flags = m.host ? m.lines.filter(isFlagged).length : 0;
-    $('hv-flags').hidden = !m.host;
+    const flags = m.lines.filter(isFlagged).length;
+    $('hv-flags').hidden = false;
     $('hv-flags').textContent = flags ? `${flags} line${flags === 1 ? '' : 's'} flagged as out of pocket.` : 'Nothing was flagged.';
     $('hv-lines').replaceChildren(...m.lines.map((l) => {
-      const li = el('li', { className: 'line' + (m.host && isFlagged(l) ? ' flagged' : '') },
+      const li = el('li', { className: 'line' + (isFlagged(l) ? ' flagged' : '') },
         el('time', { textContent: fmt(l.startMs) }),
         el('span', { className: 'line-who', textContent: l.name }),
         el('span', { className: 'line-text', textContent: l.text }),
       );
-      if (m.host && isFlagged(l)) {
-        const why = l.override === true ? 'flagged by you' : (l.flag && l.flag.labels.length ? l.flag.labels.join(', ').replace(/_/g, ' ') : 'out of pocket');
+      if (isFlagged(l)) {
+        const why = l.override === true ? 'flagged by the host' : (l.flag && l.flag.labels.length ? l.flag.labels.join(', ').replace(/_/g, ' ') : 'out of pocket');
         li.append(el('div', { className: 'line-meta' }, el('span', { className: 'why', textContent: '⚑ ' + why })));
       }
       return li;
@@ -155,7 +155,7 @@
       '',
       ...(m.summary ? ['AI SUMMARY (made on-device by the host’s Chrome)', m.summary.text, ''] : []),
       'TRANSCRIPT',
-      ...m.lines.map((l) => `[${fmt(l.startMs)}] ${l.name}: ${l.text}${m.host && isFlagged(l) ? '   ⚑ flagged' : ''}`),
+      ...m.lines.map((l) => `[${fmt(l.startMs)}] ${l.name}: ${l.text}${isFlagged(l) ? '   ⚑ flagged' : ''}`),
       '',
     ].join('\n');
     Personal.download(`speakeasy-${new Date(m.startedAt).toISOString().slice(0, 10)}-${m.room}.txt`, out);

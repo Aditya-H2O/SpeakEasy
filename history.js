@@ -7,7 +7,7 @@
 // Who can read it back, from their own account's history:
 //  - the HOST, if they were signed in: everything, flags included;
 //  - every SIGNED-IN participant: the transcript, the talk-time table and the
-//    summary, but no flags -- the same split as in the live room.
+//    summary and flags with reasons, just as in the live room.
 // Guests without an account have no history to read, but what they said is in
 // the host's copy. The room says so before anyone speaks.
 //
@@ -86,7 +86,7 @@ export function list(account, page) {
       lines: r.lines.length,
       myShare: me && total ? Math.round((me.ms / total) * 100) : null,
       hasSummary: !!r.summary,
-      ...(host && { flagged: r.lines.filter(flagged).length }),
+      flagged: r.lines.filter(flagged).length,
     });
   }
   return { page: p, pages, total: all.length, items };
@@ -109,9 +109,7 @@ export function get(account, id) {
     host,
     people: r.people.map(({ name, ms, isHost }) => ({ name, ms, isHost: !!isHost })),
     summary: r.summary || null,
-    lines: r.lines.map((l) => (host
-      ? { startMs: l.startMs, name: l.name, text: l.text, flag: l.flag, override: l.override ?? null }
-      : { startMs: l.startMs, name: l.name, text: l.text })),
+    lines: r.lines.map((l) => ({ startMs: l.startMs, name: l.name, text: l.text, flag: l.flag, override: l.override ?? null })),
   };
 }
 

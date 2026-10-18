@@ -205,16 +205,66 @@ await t('pings come from the host, from a fixed list, to someone else', async ()
   assert.equal((await post(`/api/rooms/${room}/ping`, { secret: a.secret, to: a.id, kind: 'wrap' })).status, 404);
 });
 
-await t('an interruption reaches the host, privately, at most every 30s', async () => {
-  // Bea cut in on Aditya (the host).
+await t('an interruption reaches every participant once, at most every 30s', async () => {
+  const c = (await post(`/api/rooms/${room}/join`, { name: 'Casey' })).data;
+  // Bea cut in on Aditya (the host). A bystander also gets the notice.
   assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: a.id })).status, 200);
   assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: a.id })).status, 429);
-  const toHost = await post(`/api/rooms/${room}/report`, { secret: a.secret, meetingId });
-  assert.equal(toHost.data.pings.length, 1);
-  assert.equal(toHost.data.pings[0].kind, 'interrupt');
-  assert.match(toHost.data.pings[0].text, /talking over you/);
-  assert.equal((await post(`/api/rooms/${room}/report`, { secret: b.secret, meetingId })).data.pings.length, 0);
+  const notices = [];
+  for (const person of [a, b, c]) {
+    const reply = await post(`/api/rooms/${room}/report`, { secret: person.secret, meetingId });
+    assert.equal(reply.data.pings.length, 1);
+    assert.equal(reply.data.pings[0].kind, 'interrupt');
+    notices.push(reply.data.pings[0]);
+    assert.equal((await post(`/api/rooms/${room}/report`, { secret: person.secret, meetingId })).data.pings.length, 0);
+  }
+  assert.match(notices[0].text, /talking over you/);
+  assert.match(notices[1].text, /You started talking while Aditya was still speaking/);
+  assert.match(notices[2].text, /started talking over Aditya/);
+  assert.ok(notices.every((n) => n.id === notices[0].id));
   assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: b.secret, victim: b.id })).status, 404);
+  // The host interrupting a guest is shared too.
+  assert.equal((await post(`/api/rooms/${room}/interrupted`, { secret: a.secret, victim: c.id })).status, 200);
+  for (const person of [a, b, c]) {
+    const reply = await post(`/api/rooms/${room}/report`, { secret: person.secret, meetingId });
+    assert.equal(reply.data.pings.length, 1);
+    assert.match(reply.data.pings[0].text, person === c ? /Aditya started talking over you/ : /Casey/);
+  }
+  await post(`/api/rooms/${room}/leave`, { secret: c.secret });
+});
+
+await t('speaking reports detect interruptions and notify a mic-off observer over SSE', async () => {
+  const h = (await post('/api/rooms', { name: 'Host' })).data;
+  const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
+  const observer = (await post(`/api/rooms/${h.room}/join`, { name: 'Observer' })).data;
+  await post(`/api/rooms/${h.room}/meeting`, { secret: h.secret, active: true, ...PLAN });
+  const mid = (await get(`/api/rooms/${h.room}`)).data.meeting.id;
+  const ctl = new AbortController();
+  const stream = await fetch(`${BASE}/api/rooms/${h.room}/events?p=${observer.id}`, { signal: ctl.signal });
+  const reader = stream.body.getReader();
+  try {
+    await post(`/api/rooms/${h.room}/report`, { secret: h.secret, meetingId: mid, speaking: true });
+    await sleep(1050);
+    await post(`/api/rooms/${h.room}/report`, { secret: g.secret, meetingId: mid, speaking: true });
+    await sleep(1250);
+    await post(`/api/rooms/${h.room}/report`, { secret: g.secret, meetingId: mid, speaking: true });
+    const snap = (await get(`/api/rooms/${h.room}`)).data;
+    assert.equal(snap.notices.length, 1);
+    assert.equal(snap.notices[0].text, 'Guest started talking over Host.');
+    let buf = '';
+    const timeout = setTimeout(() => ctl.abort(), 3000);
+    try {
+      while (!buf.includes('Guest started talking over Host.')) buf += new TextDecoder().decode((await reader.read()).value);
+    } finally { clearTimeout(timeout); }
+    assert.match(buf, /"kind":"interrupt"/);
+    await post(`/api/rooms/${h.room}/report`, { secret: g.secret, meetingId: mid, speaking: true });
+    assert.equal((await get(`/api/rooms/${h.room}`)).data.notices.length, 1);
+    await post(`/api/rooms/${h.room}/pause`, { secret: h.secret, paused: true });
+    assert.equal((await post(`/api/rooms/${h.room}/interrupted`, { secret: h.secret, victim: g.id })).status, 409);
+  } finally {
+    ctl.abort();
+    await post(`/api/rooms/${h.room}/leave`, { secret: h.secret });
+  }
 });
 
 // ---- transcript
@@ -245,7 +295,7 @@ await t('lines are capped, cleaned, and rate-limited', async () => {
   assert.equal(line.text.length, LIMITS.lineChars);
   assert.ok(!line.text.includes('\u0000'));
 });
-await t('an out-of-pocket line is flagged, and only the host sees it', async () => {
+await t('every participant sees offensive flags, reasons and a room notice', async () => {
   await sleep(LIMITS.lineGapMs);
   await say(b, 'You are an idiot.');
   const host = await waitChecked(a);
@@ -255,8 +305,12 @@ await t('an out-of-pocket line is flagged, and only the host sees it', async () 
   assert.deepEqual(flagged[0].flag.labels, ['toxic', 'insult']);
   assert.equal(host.flagged, 1);
   const guest = (await post(`/api/rooms/${room}/transcript/read`, { secret: b.secret })).data;
-  assert.ok(guest.lines.every((l) => !('flag' in l) && !('scores' in l)));
-  assert.equal(guest.flagged, undefined);
+  assert.deepEqual(guest.lines, host.lines);
+  assert.equal(guest.flagged, 1);
+  assert.equal(guest.canModerate, false);
+  assert.equal(host.canModerate, true);
+  const notices = (await get(`/api/rooms/${room}`)).data.notices;
+  assert.ok(notices.some((n) => n.kind === 'offensive' && n.line === flagged[0].n && /insult/.test(n.text)));
 });
 await t('the host can clear a flag, or add one the model missed', async () => {
   const host = await waitChecked(a);
@@ -338,6 +392,10 @@ await t('every client hears the change over SSE, and new lines', async () => {
   do ev = await next(); while (ev.type !== 'line');
   assert.equal(ev.data.text, 'hello room');
   assert.ok(!('flag' in ev.data));
+  do ev = await next(); while (ev.type !== 'line-update');
+  assert.equal(ev.data.text, 'hello room');
+  assert.equal(ev.data.checked, true);
+  assert.ok('flag' in ev.data);
   await post(`/api/rooms/${room}/meeting`, { secret: a.secret, active: false });
   do ev = await next(); while (!(ev.type === 'message' && ev.data.meeting.endedAt));
   ctl.abort();
@@ -610,9 +668,9 @@ await t('an ended meeting goes into the history of everyone signed in', async ()
   const theirs = (await bea('/api/me/meetings')).data;
   assert.equal(theirs.total, 1);
   assert.equal(theirs.items[0].host, false);
-  assert.ok(!('flagged' in theirs.items[0]), 'no flag counts for a participant');
+  assert.equal(theirs.items[0].flagged, archived.flagged);
 });
-await t('the host reads it back with flags; a participant without', async () => {
+await t('the host and participants both read saved flags and reasons', async () => {
   const full = (await host1(`/api/me/meetings/${archived.id}`)).data;
   assert.equal(full.summary.text, '- Launch is Thursday');
   // The room closed when the host left last; nobody fell out of the record.
@@ -622,7 +680,7 @@ await t('the host reads it back with flags; a participant without', async () => 
   assert.ok(full.lines.some((l) => l.flag));
   const part = (await bea(`/api/me/meetings/${archived.id}`)).data;
   assert.equal(part.lines.length, 2);
-  assert.ok(part.lines.every((l) => !('flag' in l)));
+  assert.deepEqual(part.lines, full.lines);
   assert.equal(part.summary.text, '- Launch is Thursday');
 });
 await t('nobody else can read it, signed in or not', async () => {

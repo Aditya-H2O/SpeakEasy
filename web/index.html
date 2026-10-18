@@ -151,8 +151,8 @@
            gets to read it. -->
       <p class="consent">
         <b>This meeting is transcribed.</b> What each person says is written down and checked by an AI
-        model for out-of-pocket remarks. Everyone sees the transcript as it happens; only the host sees
-        what was flagged. Afterwards the transcript and summary are kept in the host's meeting history,
+        model for out-of-pocket remarks. Everyone sees the transcript as it happens; everyone sees
+        flags and their reasons. Afterwards the transcript and summary are kept in the host's meeting history,
         and in yours too if you're signed in. Untick "Transcribe me" to be left out.
       </p>
 
@@ -256,9 +256,24 @@
             <p id="summary-status" class="muted small-note"></p>
             <div id="summary-text" class="summary-text"></div>
           </div>
+          <p id="transcript-status" class="muted small-note" role="status"></p>
+          <form id="transcript-form" class="transcript-form">
+            <label for="transcript-input">Add to transcript</label>
+            <div class="head-actions">
+              <input id="transcript-input" type="text" maxlength="600" placeholder="Type if speech recognition is unavailable" autocomplete="off" disabled />
+              <button id="transcript-send" class="btn small" type="submit" disabled>Send</button>
+            </div>
+          </form>
           <p id="flag-summary" class="flag-summary" hidden></p>
           <ol id="transcript" class="transcript-list" aria-live="polite"></ol>
           <p id="transcript-empty" class="muted empty">What people say shows up here during the meeting.</p>
+        </section>
+
+        <section class="card room-notices">
+          <h2>Meeting notices</h2>
+          <p class="muted small-note">Interruptions and offensive-language flags are visible to everyone.</p>
+          <ol id="room-notices" aria-live="polite"></ol>
+          <p id="room-notices-empty" class="muted">No notices yet.</p>
         </section>
 
         <div id="notes-slot-room" class="notes-area"></div>

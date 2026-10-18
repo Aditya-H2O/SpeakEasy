@@ -34,7 +34,7 @@ the transcript in its own scrolling pane; one column on narrow screens):
   (once a second while someone is mid-sentence, instead of every two), so they
   cost the site no extra requests per word.
 - **Out-of-pocket flags.** Each line is scored by the moderator. Flags are shown
-  **to the host only**, with the reason (insult, threat, obscene, ...). The host
+  **to everyone in the room**, with the reason (insult, threat, obscene, ...). The host
   can unflag a line the model got wrong or flag one it missed, filter to flagged
   lines, and **download the transcript as .txt**, during or after the meeting.
 - **AI summary.** When the host presses *End meeting*, the host's own Chrome
@@ -43,13 +43,15 @@ the transcript in its own scrolling pane; one column on narrow screens):
   included in the download. It needs desktop Chrome with its built-in AI (Chrome
   138+, roughly 16GB RAM and 22GB free disk, plus a one-time model download).
   Anywhere else the host is told so, and the transcript download still works.
-- **Your speaking habits, on your screen only.** A small red card (closable)
+- **Speaking habits.** A small red card (closable), visible only to you,
   when you use a lot of filler words ("like", "you know", "basically"... over 8
-  per 100 words, at most every 3 minutes), and when you start talking over
-  someone who was already mid-sentence (at most once a minute). The host also
-  gets a quiet notice of the interruption on their screen (at most every 30s per
-  person); nobody else sees either. Chrome's speech recognition mostly leaves "um" and "uh" out of its
-  text, so those are under-counted.
+  per 100 words, at most every 3 minutes). Chrome's speech recognition mostly
+  leaves "um" and "uh" out of its text, so those are under-counted.
+  When you start talking over someone who was already mid-sentence, everyone
+  in the room gets an interruption notice, including you and the host. The
+  server detects sustained overlapping turns from speaking reports, with a
+  30-second cooldown per interrupter. Meeting notices stay visible in the room,
+  including for participants with their microphones off.
 - **The mic bar blinks** whenever no sound is reaching SpeakEasy: mic off,
   unplugged, or sending pure silence. "I'm muted" does not stop it, because that
   box only pauses the counting.
@@ -85,7 +87,7 @@ an hour per address, wrong passwords to 10 per 10 minutes per address, and
 **Meeting history**, at the bottom of the home page when signed in: your past
 meetings, **10 to a page** with Newer/Older buttons (no endless scroll). Open
 one for its AI summary, the talk-time table and the whole transcript, or
-download it as .txt. The host's own meetings show their flags. A meeting is
+download it as .txt. Everyone’s own meetings show the flags and reasons. A meeting is
 archived when it ends and updated as its summary and last moderation results
 arrive. The host's copy and every signed-in participant's copy come from the
 same archive (`/mnt/twenty_gb_volume/speakeasy/meetings/`). Removing a meeting
@@ -209,11 +211,11 @@ are JSON, capped at 4KB.
 | `POST rooms/:code/ping {secret, to, kind}` | host only, during a meeting |
 | `POST rooms/:code/pause {secret, paused}` | host only; pause or resume |
 | `POST rooms/:code/transcript {secret, meetingId, text, startMs, endMs}` | add a line |
-| `POST rooms/:code/transcript/read {secret, meetingId?}` | lines; with scores and flags for the host |
+| `POST rooms/:code/transcript/read {secret, meetingId?}` | lines, scores and flags for every participant; canModerate for host permissions |
 | `POST rooms/:code/transcript/flag {secret, n, flagged}` | host only; `null` returns to the model's verdict |
 | `POST rooms/:code/leave {secret}` | the host leaving closes the room |
 | `POST rooms/:code/transcript/summary {secret, meetingId, text}` | host only, after the meeting ends |
-| `POST rooms/:code/interrupted {secret, victim}` | your page saw you cut in; tells the host |
+| `POST rooms/:code/interrupted {secret, victim}` | your page saw you cut in; notifies every participant |
 | `GET me/meetings?page=N` | your history, 10 per page, newest first |
 | `GET me/meetings/:id` / `POST me/meetings/:id/remove` | one meeting in full; take it off your list |
 | `POST auth/register {username, password}` | make an account and sign in (sets the session cookie) |
@@ -291,6 +293,8 @@ cd moderator && npm ci && npm run fetch-model && npm start   # :3009, optional
 npm test                                     # server + extension
 cd moderator && npm test                     # tokenizer + model, needs the model
 ```
+
+Use Google Chrome for microphone transcription; embedded browsers may not provide a working speech service. Each participant must enable their mic and “Transcribe me”, and the host must start the meeting. The transcript panel shows recognition errors and offers typed input, shared and moderated like spoken lines.
 
 `getUserMedia` and speech recognition need a secure context. `localhost` counts;
 a LAN IP does not. Without the moderator running, lines simply stay unchecked.

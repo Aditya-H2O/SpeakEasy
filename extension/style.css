@@ -383,3 +383,9 @@ input[type="password"] { font: inherit; width: 100%; padding: 10px 12px; border-
 .signin-dialog .card-head { margin-bottom: 0; }
 .signin-dialog .card-head form { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .signin-dialog[open] { animation: none; } }
+
+.transcript-form { display: grid; gap: 6px; margin-block: 12px; }
+.transcript-form input { flex: 1; min-width: 0; }
+.room-notices { grid-column: 1 / -1; }
+#room-notices { padding-left: 22px; max-height: 240px; overflow: auto; }
+#room-notices li { padding-block: 8px; }

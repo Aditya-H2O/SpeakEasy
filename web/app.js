@@ -83,8 +83,9 @@
     lastSpeaking: false,
     reporting: false,
     // transcript
-    lines: [], // this meeting's lines; with flags when we are the host
-    hostView: false,
+    lines: [], // shared transcript and moderation reasons
+    hostView: false, // permission to edit flags and generate summaries
+    noticeIds: new Set(),
     stt: null, // Transcriber
     sttState: 'off',
     // nudges and pings
@@ -275,8 +276,8 @@
       const snap = JSON.parse(e.data);
       S.clockOffset = snap.serverNow - Date.now();
       S.snap = snap;
-      trackOthersSpeaking();
       syncMeeting();
+      renderNotices();
       render();
     };
     es.addEventListener('line', (e) => {
@@ -285,6 +286,14 @@
       if (!m || line.meetingId !== m.id || S.lines.some((l) => l.n === line.n)) return;
       S.lines.push(line);
       S.interims.delete(line.pid); // the finished line replaces the words in progress
+      renderTranscript();
+    });
+    es.addEventListener('line-update', (e) => {
+      const line = JSON.parse(e.data);
+      if (line.meetingId !== S.snap?.meeting?.id) return;
+      const i = S.lines.findIndex((l) => l.n === line.n);
+      if (i < 0) S.lines.push(line);
+      else S.lines[i] = line;
       renderTranscript();
     });
     // Someone's words as they say them, before the line is finished.
@@ -373,10 +382,10 @@
       });
       if (r.status === 403) await rejoin();
       else if (r.status === 404) roomGone();
-      // The host's pings to us ride back on the reply.
+      // Pings and room-wide interruption notices ride back on the reply.
       else if (r.ok && r.data.pings) {
         for (const p of r.data.pings) {
-          if (p.kind === 'interrupt') toast('Interruption', p.text, 'ping'); // to the host
+          if (p.kind === 'interrupt') receiveNotice(p);
           else toast('From the host', p.text, 'ping');
         }
       }
@@ -699,46 +708,23 @@
     fillerQuietUntil = Date.now() + 3 * 60e3;
   }
 
-  // ---- interrupting: on YOUR screen, when YOU cut in ------------------------
-  //
-  // You start talking while someone else has already been talking for a
-  // second, and 1.2 seconds later you are both still going. Once a minute at
-  // most. Their speaking state comes from the room (up to a second behind),
-  // which is why the thresholds are not tighter. Without headphones, their
-  // voice coming out of your speakers can look like you talking over them.
-  const speakingSince = new Map(); // participant id -> when the room first showed them speaking
-  let cutIn = null; // { id, name, at } while we are deciding
-  let wasSpeaking = false;
-  let interruptQuietUntil = 0;
-
-  function trackOthersSpeaking() {
-    const t = Date.now();
-    for (const p of S.snap.participants) {
-      if (p.speaking && !p.away) { if (!speakingSince.has(p.id)) speakingSince.set(p.id, t); }
-      else speakingSince.delete(p.id);
-    }
+  function receiveNotice(notice) {
+    if (S.noticeIds.has(notice.id)) return;
+    S.noticeIds.add(notice.id);
+    toast(notice.kind === 'interrupt' ? 'Interruption' : 'Offensive language flagged', notice.text, 'warn');
   }
 
-  function checkInterruption() {
-    const t = Date.now();
-    const me = S.vad.speaking && counting();
-    if (!me) { wasSpeaking = false; cutIn = null; return; }
-    const others = (S.snap ? S.snap.participants : []).filter((p) => p.id !== S.me.id && p.speaking && !p.away);
-    if (!wasSpeaking) {
-      wasSpeaking = true;
-      const victim = others.find((p) => t - (speakingSince.get(p.id) ?? t) >= 1000);
-      cutIn = victim ? { id: victim.id, name: victim.name, at: t } : null;
-      return;
-    }
-    if (!cutIn || t - cutIn.at < 1200) return;
-    const stillTalking = others.some((p) => p.id === cutIn.id);
-    if (stillTalking && t >= interruptQuietUntil) {
-      toast('You may have cut someone off', `You started talking while ${cutIn.name} was still speaking. Let them finish?`, 'warn');
-      interruptQuietUntil = t + 60e3;
-      // And the host hears about it, quietly, on their own screen.
-      api(`rooms/${S.code}/interrupted`, { secret: S.me.secret, victim: cutIn.id }).catch(() => {});
-    }
-    cutIn = null;
+  function renderNotices() {
+    const notices = (S.snap?.notices || []).filter((n) => n.meetingId === S.snap?.meeting?.id);
+    $('room-notices').replaceChildren(...notices.slice().reverse().map((n) => {
+      const item = document.createElement('li');
+      const title = document.createElement('strong');
+      title.textContent = n.kind === 'interrupt' ? 'Interruption: ' : 'Offensive language: ';
+      item.append(title, document.createTextNode(n.text));
+      return item;
+    }));
+    $('room-notices-empty').hidden = notices.length > 0;
+    for (const notice of notices) receiveNotice(notice);
   }
 
   const PING_LABELS = {
@@ -793,7 +779,6 @@
         // even through noise suppression, sits far above -110 dBFS; a muted
         // or dead input reads exactly zero, which is -200 here.
         if (e.data.levelDb > -110) S.heardAt = Date.now();
-        if (S.me && liveMeeting()) checkInterruption();
         renderMic();
         report(false); // the worklet is the one clock a background tab cannot slow down
       };
@@ -919,7 +904,8 @@
   function syncTranscriber() {
     const want = !!(liveMeeting() && !isPaused() && S.audio && !S.paused && $('transcribe-me').checked);
     if (!Transcriber.supported) {
-      $('stt-state').textContent = want ? 'This browser cannot transcribe; use Chrome.' : '';
+      $('stt-state').textContent = want ? 'This browser cannot transcribe; use Google Chrome, or type below.' : '';
+      renderTranscriptionStatus();
       return;
     }
     if (!S.stt) {
@@ -944,16 +930,42 @@
         onState: (state, detail) => {
           S.sttState = state;
           $('stt-state').textContent = state === 'error' ? detail : STT_TEXT[state] || '';
+          renderTranscriptionStatus();
         },
       });
     }
     if (want) S.stt.start();
     else if (S.stt.want) S.stt.stop();
+    renderTranscriptionStatus();
   }
+
+  function renderTranscriptionStatus() {
+    const m = liveMeeting();
+    const paused = isPaused();
+    $('transcript-status').textContent = !m ? 'The host must start the meeting before transcription begins.'
+      : paused ? 'Meeting paused. Transcription will resume with the meeting.'
+      : !S.audio ? 'Turn on your microphone to transcribe your speech. Everyone sees submitted lines. You can also type below.'
+      : S.paused ? 'Your microphone is paused.'
+      : !$('transcribe-me').checked ? 'Transcription is off. Enable “Transcribe me” to share your speech, or type below.'
+      : $('stt-state').textContent || 'Waiting for speech recognition. You can also type below.';
+    $('transcript-input').disabled = !m || paused;
+    $('transcript-send').disabled = !m || paused;
+  }
+
+  $('transcript-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = $('transcript-input');
+    const text = input.value.trim();
+    if (!text) return;
+    $('transcript-send').disabled = true;
+    const ok = await sendLine({ text, startAt: Date.now(), endAt: Date.now() });
+    if (ok) input.value = '';
+    renderTranscriptionStatus();
+  });
 
   async function sendLine({ text, startAt, endAt }) {
     const m = liveMeeting();
-    if (!m || !S.me || m.pausedAt) return;
+    if (!m || !S.me || m.pausedAt) return false;
     noteFillers(text);
     const body = {
       secret: S.me.secret,
@@ -967,10 +979,14 @@
       await new Promise((res) => setTimeout(res, 400));
       r = await api(`rooms/${S.code}/transcript`, body).catch(() => null);
     }
+    if (!r?.ok) {
+      $('transcript-status').textContent = 'Transcript was not sent: ' + (r?.data?.error || 'connection lost; please try again.');
+      toast('Transcript not sent', $('transcript-status').textContent, 'warn');
+    }
+    return !!r?.ok;
   }
 
-  // Everyone gets the lines as they are spoken (SSE). The host also polls for
-  // the moderator's verdicts, which are never broadcast.
+  // Everyone gets lines and verdicts over SSE; polling also repairs missed updates.
   let loadingTranscript = false;
   async function loadTranscript() {
     if (!S.me || loadingTranscript) return;
@@ -981,8 +997,8 @@
       const m = S.snap && S.snap.meeting;
       if (r.data.meeting && m && r.data.meeting.id !== m.id) return; // raced a new meeting
       S.lines = r.data.lines;
-      S.hostView = 'flagged' in r.data;
-      S.flagInfo = S.hostView ? { flagged: r.data.flagged, unchecked: r.data.unchecked } : null;
+      S.hostView = !!r.data.canModerate;
+      S.flagInfo = { flagged: r.data.flagged, unchecked: r.data.unchecked };
       if (S.hostView && !S.summaryBusy) S.summary = r.data.summary || null;
       renderTranscript();
     } finally {
@@ -992,7 +1008,7 @@
   setInterval(() => {
     // While anything could still change: a live meeting, or lines the model
     // has not reached yet.
-    if (S.me && amHost() && (liveMeeting() || (S.flagInfo && S.flagInfo.unchecked))) loadTranscript();
+    if (S.me && (liveMeeting() || (S.flagInfo && S.flagInfo.unchecked))) loadTranscript();
   }, 4000);
 
   const isFlagged = (l) => (l.override ?? !!l.flag);
@@ -1018,28 +1034,28 @@
     const list = $('transcript');
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
     const host = S.hostView;
-    const onlyFlagged = host && $('flag-filter').checked;
+    const onlyFlagged = $('flag-filter').checked;
     const lines = onlyFlagged ? S.lines.filter(isFlagged) : S.lines;
-    $('flag-filter-wrap').hidden = !host;
-    $('transcript-download').hidden = !host || !S.lines.length;
+    $('flag-filter-wrap').hidden = false;
+    $('transcript-download').hidden = !S.lines.length;
     $('transcript-empty').hidden = lines.length > 0;
     $('transcript-empty').textContent = onlyFlagged ? 'Nothing flagged.' : 'What people say shows up here during the meeting.';
 
-    if (host && S.lines.length) {
+    if (S.lines.length) {
       const f = S.lines.filter(isFlagged).length;
       const u = S.lines.filter((l) => !l.checked).length;
       $('flag-summary').hidden = false;
       $('flag-summary').className = 'flag-summary' + (f ? ' has-flags' : '');
       $('flag-summary').textContent =
         `${f ? `${f} line${f === 1 ? '' : 's'} flagged as out of pocket` : 'Nothing flagged'}` +
-        (u ? ` · ${u} still being checked` : '') + '. Only you can see flags.';
+        (u ? ` · ${u} still being checked` : '') + '. Everyone in the room can see flags and reasons.';
     } else {
       $('flag-summary').hidden = true;
     }
 
     list.replaceChildren(...lines.map((l) => {
       const li = document.createElement('li');
-      li.className = 'line' + (S.me && l.pid === S.me.id ? ' mine' : '') + (host && isFlagged(l) ? ' flagged' : '');
+      li.className = 'line' + (S.me && l.pid === S.me.id ? ' mine' : '') + (isFlagged(l) ? ' flagged' : '');
       const time = document.createElement('time');
       time.textContent = fmt(l.startMs);
       const who = document.createElement('span');
@@ -1049,17 +1065,19 @@
       text.className = 'line-text';
       text.textContent = l.text; // textContent: transcript text comes from other people's browsers
       li.append(time, who, text);
-      if (host) {
+      {
         const meta = document.createElement('div');
         meta.className = 'line-meta';
         if (!l.checked) meta.append(Object.assign(document.createElement('span'), { className: 'muted', textContent: 'checking…' }));
         else if (isFlagged(l)) meta.append(Object.assign(document.createElement('span'), { className: 'why', textContent: '⚑ ' + flagWhy(l) }));
-        const btn = Object.assign(document.createElement('button'), {
-          className: 'link-btn',
-          textContent: isFlagged(l) ? 'Unflag' : 'Flag',
-        });
-        btn.addEventListener('click', () => setFlag(l, !isFlagged(l)));
-        meta.append(btn);
+        if (host) {
+          const btn = Object.assign(document.createElement('button'), {
+            className: 'link-btn',
+            textContent: isFlagged(l) ? 'Unflag' : 'Flag',
+          });
+          btn.addEventListener('click', () => setFlag(l, !isFlagged(l)));
+          meta.append(btn);
+        }
         li.append(meta);
       }
       return li;
@@ -1078,7 +1096,7 @@
     for (const el of list.querySelectorAll('.line.interim')) el.remove();
     const t = Date.now();
     for (const [pid, it] of S.interims) if (t - it.at > 10000) S.interims.delete(pid);
-    if (!S.hostView || !$('flag-filter').checked) {
+    if (!$('flag-filter').checked) {
       for (const [pid, it] of [...S.interims].sort((a, b) => a[1].startMs - b[1].startMs)) {
         const li = document.createElement('li');
         li.className = 'line interim' + (S.me && pid === S.me.id ? ' mine' : '');

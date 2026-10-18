@@ -10,8 +10,8 @@
 // meeting's start. Every line is scored by the moderator (moderator/, a small
 // open-weight toxicity model in its own process on 127.0.0.1:3009), and lines
 // over the thresholds below are flagged. Everyone in the room sees the
-// transcript as it is written; only the host sees the flags, and only the host
-// can read the whole thing back and download it once the meeting is over.
+// transcript, flags and reasons as they arrive, and can download it. Only the
+// host can edit flags.
 //
 // No dependencies, no database. Rooms live in memory and are snapshotted to
 // SPEAKEASY_STATE_FILE so a restart or a deploy does not end a meeting. Closing
@@ -168,6 +168,7 @@ function snapshot(room) {
       pausedAt: m.pausedAt || null, pausedMs: m.pausedMs || 0,
     },
     lines: room.transcript.length,
+    notices: room.notices || [],
     participants: [...room.participants.values()].map((p) => ({
       id: p.id,
       name: p.name,
@@ -308,8 +309,10 @@ export function join(room, name, asHost = false, account = null) {
 // last report, and never past the length of the meeting.
 export function report(room, p, body) {
   const t = now();
+  const previouslySeenAt = p.seenAt;
   p.seenAt = t;
   p.leavingAt = null; // a reload that came back: not leaving after all
+  const wasSpeaking = p.speaking && t - previouslySeenAt < LIMITS.awayMs;
   p.speaking = !!body.speaking;
   p.micOn = !!body.micOn;
   p.micLive = !!body.micLive;
@@ -334,6 +337,22 @@ export function report(room, p, body) {
       );
       p.ms = Math.min(claimed, ceiling);
     }
+  }
+  if (live && p.speaking) {
+    if (!wasSpeaking || p.speakingMeeting !== m.id) {
+      p.speakingSince = t;
+      p.speakingMeeting = m.id;
+      const victim = [...room.participants.values()].find((q) => q !== p && q.speaking && q.speakingMeeting === m.id && t - q.seenAt < LIMITS.awayMs && t - q.speakingSince >= 1000);
+      p.cutIn = victim ? { id: victim.id, at: t } : null;
+    }
+    if (p.cutIn && t - p.cutIn.at >= 1200) {
+      const victim = [...room.participants.values()].find((q) => q.id === p.cutIn.id);
+      if (victim && victim.speaking && t - victim.seenAt < LIMITS.awayMs) notifyInterruption(room, p, victim);
+      p.cutIn = null;
+    }
+  } else {
+    p.speakingSince = null;
+    p.cutIn = null;
   }
   p.reportedAt = t;
   setInterim(room, p, live ? body.interim : null);
@@ -378,6 +397,7 @@ export function setMeeting(room, active, plan) {
   const t = now();
   const m = room.meeting;
   if (active && !(m && !m.endedAt)) {
+    room.notices = [];
     room.meeting = { id: token(6), startedAt: t, endedAt: null, ...plan };
     for (const p of room.participants.values()) { p.meetingId = room.meeting.id; p.ms = 0; p.reportedAt = t; noteRoster(room, room.meeting.id, p); }
   } else if (!active && m && !m.endedAt) {
@@ -447,7 +467,7 @@ function scheduleArchive(room, meetingId) {
 
 const cleanText = (s) => String(s ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, LIMITS.lineChars);
 
-// What everyone sees. Scores and flags are for the host alone.
+// Every participant sees the transcript and moderation reasons.
 const publicLine = (l) => ({ n: l.n, meetingId: l.meetingId, pid: l.pid, name: l.name, startMs: l.startMs, endMs: l.endMs, text: l.text });
 const hostLine = (l) => ({ ...publicLine(l), scores: l.scores, flag: l.flag, checked: !!l.scores, override: l.override ?? null });
 
@@ -548,10 +568,16 @@ async function pumpModeration() {
       line.scores = scores[0];
       line.windowScores = scores[1] || null;
       line.flag = decideFlag(line.scores, line.windowScores);
-      dirty = true;
+      publishLine(room, line);
+      if (line.flag) roomNotice(room, {
+        kind: 'offensive', pid: line.pid, name: line.name, line: line.n,
+        meetingId: line.meetingId,
+        text: `${line.name}: ${line.flag.labels.join(', ').replace(/_/g, ' ') || 'toxic language'} — “${line.text}”`,
+      });
+      changed(room);
       if (room.meeting && room.meeting.id === line.meetingId && room.meeting.endedAt) scheduleArchive(room, line.meetingId);
     } catch (e) {
-      // Down or overloaded: the line stays unchecked (the host sees that), and
+      // Down or overloaded: the line stays unchecked for everyone, and
       // is retried once the moderator answers again.
       console.error('moderation failed:', e.message);
       modQueue.unshift({ room, line });
@@ -567,13 +593,12 @@ export function transcriptFor(room, asHost, meetingId) {
   const lines = room.transcript.filter((l) => l.meetingId === id);
   return {
     meeting: m && m.id === id ? { id: m.id, startedAt: m.startedAt, endedAt: m.endedAt, plannedMs: m.plannedMs, thresholdPct: m.thresholdPct } : null,
-    lines: lines.map(asHost ? hostLine : publicLine),
+    lines: lines.map(hostLine),
+    canModerate: asHost,
     ...(asHost && { summary: (room.summaries || {})[id] || null }),
-    ...(asHost && {
-      flagged: lines.filter((l) => (l.override ?? !!l.flag)).length,
-      unchecked: lines.filter((l) => !l.scores).length,
-      thresholds: FLAG,
-    }),
+    flagged: lines.filter((l) => (l.override ?? !!l.flag)).length,
+    unchecked: lines.filter((l) => !l.scores).length,
+    thresholds: FLAG,
   };
 }
 
@@ -583,9 +608,39 @@ export function overrideFlag(room, n, flagged) {
   const line = room.transcript.find((l) => l.n === n);
   if (!line) return false;
   line.override = flagged === null ? null : !!flagged;
-  dirty = true;
+  publishLine(room, line);
+  changed(room);
   archiveMeeting(room, line.meetingId);
   return true;
+}
+
+// Room notices arrive over the room stream even when a participant's mic is off.
+function roomNotice(room, notice) {
+  const item = { id: token(6), at: now(), meetingId: room.meeting?.id, ...notice };
+  room.notices = [...(room.notices || []), item].slice(-50);
+  changed(room);
+  return item;
+}
+
+function notifyInterruption(room, p, victim) {
+  if (now() - (p.interruptAt || 0) < 30000) return;
+  p.interruptAt = now();
+  const notice = roomNotice(room, {
+    kind: 'interrupt', pid: p.id, name: p.name, victim: victim.id,
+    text: `${p.name} started talking over ${victim.name}.`,
+  });
+  // Keep report delivery for older clients. New pages deduplicate by notice ID.
+  for (const recipient of room.participants.values()) {
+    const text = recipient === p
+      ? `You started talking while ${victim.name} was still speaking. Let them finish?`
+      : `${p.name} started talking over ${recipient === victim ? 'you' : victim.name}.`;
+    recipient.pings = [...(recipient.pings || []), { ...notice, text }].slice(-5);
+  }
+}
+
+function publishLine(room, line) {
+  const data = `event: line-update\ndata: ${JSON.stringify(hostLine(line))}\n\n`;
+  for (const res of room.streams) res.write(data);
 }
 
 // ---- persistence ----------------------------------------------------------
@@ -594,6 +649,7 @@ function save() {
   if (!STATE_FILE || !dirty) return;
   const data = [...rooms.values()].map((r) => ({
     id: r.id, createdAt: r.createdAt, touchedAt: r.touchedAt, meeting: r.meeting, hostId: r.hostId,
+    notices: r.notices || [],
     hostAccount: r.hostAccount, attendees: r.attendees, roster: r.roster,
     participants: [...r.participants.values()], transcript: r.transcript, lineSeq: r.lineSeq, summaries: r.summaries,
   }));
@@ -887,21 +943,14 @@ export async function handle(req, res) {
     return send(res, 200, { ok: true });
   }
 
-  // A page noticed its own person talking over someone (app.js decides that,
-  // from the speaking states it can see). The host hears about it quietly,
-  // the same way pings reach their target: in the reply to their next
-  // report. At most every 30s per person, so a heated minute is not a flood.
+  // Older clients report interruptions themselves. Share these through the
+  // same room notices and cooldown as server-detected interruptions.
   if (action === 'interrupted') {
-    if (!live) return send(res, 409, { error: 'only during a meeting' });
+    if (!live || room.meeting.pausedAt) return send(res, 409, { error: 'only during an active meeting' });
     const victim = [...room.participants.values()].find((q) => q.id === body.victim);
-    const host = [...room.participants.values()].find((q) => q.id === room.hostId);
     if (!victim || victim === p) return send(res, 404, { error: 'no such person' });
     if (now() - (p.interruptAt || 0) < 30000) return send(res, 429, { error: 'too often' });
-    p.interruptAt = now();
-    if (host && host !== p) {
-      const text = victim === host ? `${p.name} started talking over you.` : `${p.name} started talking over ${victim.name}.`;
-      host.pings = [...(host.pings || []), { id: token(4), kind: 'interrupt', text, at: now() }].slice(-5);
-    }
+    notifyInterruption(room, p, victim);
     return send(res, 200, { ok: true });
   }
 
