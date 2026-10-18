@@ -20,8 +20,12 @@ WorkingDirectory=/opt/speakeasy
 # thing that should reach it. Port allocation as of 2026-10-17:
 #   3001 daycards   3002 (retired: clef)   3003 gate   3004 champpool
 #   3005 uvaguessr  3006 vs   3007 landing (not enabled)   3008 speakeasy
+#   3009 speakeasy-moderator   3010 speakeasy control
 Environment=HOST=127.0.0.1
 Environment=PORT=3008
+# The control port, for Gate's "close all rooms" button (/_gate/admin). Loopback
+# only and never in nginx: anything on it is admin-only by where it listens.
+Environment=SPEAKEASY_ADMIN_PORT=3010
 
 # Rooms live in memory and are snapshotted here every 15s and on SIGTERM, so a
 # deploy (`systemctl restart`) does not end a meeting in progress. Outside the

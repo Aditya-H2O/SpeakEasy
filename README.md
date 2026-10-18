@@ -322,6 +322,11 @@ can use.
 Restarting `speakeasy` keeps rooms and transcripts: state is saved on SIGTERM
 and reloaded on start.
 
+**Closing every room** is the "Close all rooms" button on Gate's console
+(`/_gate/admin`). It calls SpeakEasy's control port, `127.0.0.1:3010`
+(`SPEAKEASY_ADMIN_PORT`), which nginx never proxies: reaching it at all is the
+authorization. By hand on the box: `curl -X POST localhost:3010/rooms/close`.
+
 **Gate first, then nginx.** `/speakeasy` is in Gate's `ROOM_PREFIXES` (every
 method passes the door; the app checks the room). nginx has the `/speakeasy/`
 proxy block (16k body cap, for the summary; the app caps everything else at

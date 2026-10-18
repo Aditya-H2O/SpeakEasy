@@ -33,6 +33,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, 'web');
 const PORT = Number(process.env.PORT || 3008);
 const HOST = process.env.HOST || '127.0.0.1';
+// The control port: loopback only, and nginx never proxies it. Gate's admin
+// console calls it to close every room. Unset, it does not listen at all.
+const ADMIN_PORT = Number(process.env.SPEAKEASY_ADMIN_PORT || 0);
 const STATE_FILE = process.env.SPEAKEASY_STATE_FILE || '';
 
 // Ceilings. Anyone who can load the page can create a room and join it, so
@@ -991,6 +994,26 @@ export async function handle(req, res) {
   return send(res, 404, { error: 'not found' });
 }
 
+// The site admin ending every meeting at once, from Gate's console.
+export function closeAllRooms() {
+  const n = rooms.size;
+  for (const room of [...rooms.values()]) closeRoom(room, 'admin');
+  if (n) save();
+  return n;
+}
+
+// Not on the public port on purpose: Gate lets every method through to
+// /speakeasy, so a route there would be anyone's. This server is reached only
+// over loopback, and nginx has no location pointing at it.
+export function createAdminServer() {
+  return http.createServer((req, res) => {
+    const path = new URL(req.url, 'http://x').pathname;
+    if (path === '/rooms' && req.method === 'GET') return send(res, 200, { rooms: rooms.size });
+    if (path === '/rooms/close' && req.method === 'POST') return send(res, 200, { closed: closeAllRooms() });
+    send(res, 404, { error: 'not found' });
+  });
+}
+
 export function createServer() {
   return http.createServer((req, res) => {
     handle(req, res).catch((e) => { console.error(e); if (!res.headersSent) send(res, 500, { error: 'server error' }); });
@@ -1003,6 +1026,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   load();
   const server = createServer();
   server.listen(PORT, HOST, () => console.log(`speakeasy on http://${HOST}:${PORT}`));
+  if (ADMIN_PORT) {
+    createAdminServer().listen(ADMIN_PORT, '127.0.0.1', () => console.log(`speakeasy control on http://127.0.0.1:${ADMIN_PORT}`));
+  }
 
   // SSE comments every 20s keep Cloudflare (100s idle cutoff) and nginx from
   // closing a quiet stream, and re-broadcasting lets "away" appear for someone

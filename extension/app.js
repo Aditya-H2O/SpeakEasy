@@ -251,6 +251,7 @@
 
   const GONE = {
     host: ['The host closed the meeting', 'Everyone has been sent out of the room, and its code no longer works.'],
+    admin: ['The site closed the meeting', 'SpeakEasy was shut down for now. Everyone has been sent out of the room, and its code no longer works.'],
     default: ['That room is closed', 'A room closes when the host leaves, when the last person leaves, or ten minutes after everyone closes the page.'],
   };
 

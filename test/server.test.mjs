@@ -722,6 +722,34 @@ await t('the extension origin gets CORS, nobody else does', async () => {
   assert.equal(evil.headers.get('access-control-allow-origin'), null);
 });
 
+await t('the control port closes every room, telling open streams why', async () => {
+  const { createAdminServer } = await import('../server.js');
+  const admin = createAdminServer();
+  await new Promise((r) => admin.listen(0, '127.0.0.1', r));
+  const ctl = `http://127.0.0.1:${admin.address().port}`;
+  try {
+    const made = (await post('/api/rooms', { name: 'Closer' })).data;
+    assert.ok(made.room, 'a room to close');
+    const events = await fetch(`${BASE}/api/rooms/${made.room}/events?p=${made.id}`);
+    const reader = events.body.getReader();
+    assert.ok((await (await fetch(`${ctl}/rooms`)).json()).rooms >= 1);
+    const r = await (await fetch(`${ctl}/rooms/close`, { method: 'POST' })).json();
+    assert.ok(r.closed >= 1);
+    let text = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += new TextDecoder().decode(value);
+    }
+    assert.match(text, /event: closed\ndata: \{"reason":"admin"\}/);
+    assert.equal((await get(`/api/rooms/${made.room}`)).status, 404);
+    assert.equal((await (await fetch(`${ctl}/rooms`)).json()).rooms, 0);
+    assert.equal((await fetch(`${ctl}/rooms/close`)).status, 404, 'GET does not close anything');
+  } finally {
+    admin.close();
+  }
+});
+
 await t('health answers', async () => assert.equal((await get('/api/health')).data.ok, true));
 
 console.log(`\n${pass} passed${process.exitCode ? ', some FAILED' : ''}`);
