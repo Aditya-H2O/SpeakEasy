@@ -296,8 +296,8 @@
       <p id="notes-saved" class="muted small-note">Saved on this device</p>
     </section>
 
-    <!-- Sign in: aditya-h.com's own visitor accounts, the same as Grounds
-         Guessr and VS. A real modal <dialog>: showModal() traps focus and dims
+    <!-- Sign in: SpeakEasy's own accounts, separate from the rest of
+         aditya-h.com; anyone can make one. A real modal <dialog>: showModal() traps focus and dims
          the page; Esc, the Close button or a click outside (closedby="any")
          dismisses it. Optional: anyone can still join a meeting without. -->
     <dialog id="signin-dialog" class="signin-dialog" closedby="any" aria-labelledby="signin-title">
@@ -306,17 +306,16 @@
         <form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form>
       </div>
       <p class="muted small-note">
-        With an aditya-h.com account your notes, to-do lists and meeting history are saved to it, so they
-        follow you to any device and into the extension. It's the same account as Grounds Guessr and VS.
+        With a SpeakEasy account your notes, to-do lists and meeting history are saved to it, so they
+        follow you to any device and into the extension.
       </p>
       <form id="signin-form" class="signin-form">
-        <input id="signin-user" autocomplete="username" placeholder="Username" aria-label="Username" required maxlength="40" autofocus />
-        <input id="signin-pass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required />
-        <input id="signin-invite" autocomplete="off" placeholder="Invite code" aria-label="Invite code" hidden />
+        <input id="signin-user" autocomplete="username" placeholder="Username" aria-label="Username" required minlength="3" maxlength="24" autofocus />
+        <input id="signin-pass" type="password" minlength="8" autocomplete="current-password" placeholder="Password" aria-label="Password" required />
         <button id="signin-go" class="btn primary">Sign in</button>
       </form>
       <p class="small-note">
-        <button id="signin-toggle" type="button" class="link-btn">I have an invite code (make an account)</button>
+        <button id="signin-toggle" type="button" class="link-btn">New here? Make an account</button>
       </p>
       <p id="signin-error" class="error" role="alert"></p>
     </dialog>

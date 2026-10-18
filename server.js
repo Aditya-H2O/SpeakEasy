@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { whoami, readData, writeData, accountsEnabled, DATA_LIMITS } from './accounts.js';
+import { whoami, register, login, signOutCookie, readData, writeData, accountsEnabled, DATA_LIMITS } from './accounts.js';
 import * as history from './history.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -172,7 +172,7 @@ function snapshot(room) {
       id: p.id,
       name: p.name,
       host: p.id === room.hostId,
-      account: !!p.accountId, // signed in to an aditya-h.com account
+      account: !!p.accountId, // signed in to a SpeakEasy account
       speaking: p.speaking && t - p.seenAt < LIMITS.awayMs,
       away: t - p.seenAt >= LIMITS.awayMs,
       micOn: p.micOn,
@@ -727,8 +727,21 @@ export async function handle(req, res) {
     return send(res, 200, { full: rooms.size >= LIMITS.rooms });
   }
 
+  // SpeakEasy's own accounts (accounts.js): make one, sign in, sign out. Each
+  // answers with the session cookie set or cleared, and who you now are.
+  if (parts[1] === 'auth' && parts.length === 3 && req.method === 'POST') {
+    const body = await readJson(req);
+    if (body === TOO_BIG) return send(res, 413, { error: 'request too large' });
+    if (parts[2] === 'logout') return send(res, 200, { player: null }, { 'set-cookie': signOutCookie() });
+    if (!body || typeof body !== 'object') return send(res, 400, { error: 'bad body' });
+    const r = parts[2] === 'register' ? await register(clientIp(req), body)
+      : parts[2] === 'login' ? await login(clientIp(req), body) : null;
+    if (!r) return send(res, 404, { error: 'not found' });
+    return send(res, r.status, r.body, r.cookie ? { 'set-cookie': r.cookie } : {});
+  }
+
   // Your account, and the notes and scheduled meetings tied to it. Who you
-  // are comes from the site's shared visitor session (accounts.js); the data
+  // are comes from SpeakEasy's own session cookie (accounts.js); the data
   // itself is only ever read or written by its owner.
   if (parts[1] === 'me') {
     const player = await whoami(req);

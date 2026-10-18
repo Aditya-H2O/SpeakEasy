@@ -22,24 +22,12 @@ const fakeModerator = http.createServer((req, res) => {
 await new Promise((r) => fakeModerator.listen(0, '127.0.0.1', r));
 process.env.SPEAKEASY_MODERATOR_URL = `http://127.0.0.1:${fakeModerator.address().port}`;
 
-// The site's accounts, faked: Grounds Guessr's GET /api/auth/me, which knows
-// exactly one session cookie.
-const PLAYER = { id: '11111111-2222-3333-4444-555555555555', username: 'aditya' };
-const SESSION = `${PLAYER.id}.9999999999999.${'ab'.repeat(32)}`;
-const PLAYER2 = { id: '66666666-7777-8888-9999-000000000000', username: 'bea' };
-const SESSION2 = `${PLAYER2.id}.9999999999999.${'cd'.repeat(32)}`;
-const fakeAccounts = http.createServer((req, res) => {
-  const c = req.headers.cookie || '';
-  const player = c.includes(`aditya_player=${SESSION}`) ? PLAYER : c.includes(`aditya_player=${SESSION2}`) ? PLAYER2 : null;
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ player }));
-});
-await new Promise((r) => fakeAccounts.listen(0, '127.0.0.1', r));
-process.env.SPEAKEASY_ACCOUNTS_ME_URL = `http://127.0.0.1:${fakeAccounts.address().port}/me`;
 const os = await import('node:os');
 const fsx = await import('node:fs');
 const pathx = await import('node:path');
 process.env.SPEAKEASY_USER_DIR = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'speakeasy-users-'));
+process.env.SPEAKEASY_ACCOUNTS_FILE = pathx.join(process.env.SPEAKEASY_USER_DIR, 'accounts.json');
+process.env.SPEAKEASY_SESSION_KEY_FILE = pathx.join(process.env.SPEAKEASY_USER_DIR, 'session.key');
 process.env.SPEAKEASY_MEETING_DIR = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'speakeasy-meetings-'));
 
 const { createServer, LIMITS, PINGS, decideFlag, sweep } = await import('../server.js');
@@ -48,6 +36,16 @@ LIMITS.rooms = 5; // the one-room rule has its own test below
 const server = createServer();
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const BASE = `http://127.0.0.1:${server.address().port}`;
+
+// Two real accounts, made through the API. Node's fetch keeps no cookies, so
+// the session is lifted out of Set-Cookie by hand.
+const signUp = async (username) => {
+  const r = await fetch(`${BASE}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password: 'correct horse' }) });
+  const session = /speakeasy_session=([^;]+)/.exec(r.headers.get('set-cookie'))[1];
+  return [(await r.json()).player, session];
+};
+const [PLAYER, SESSION] = await signUp('aditya');
+const [PLAYER2, SESSION2] = await signUp('bea');
 
 let pass = 0;
 const t = async (name, fn) => {
@@ -412,7 +410,9 @@ await t('a host whose page vanished without a word closes the room', async () =>
   // The main test room's host has no page open either; keep theirs open, or
   // the sweep below would (rightly) close that room too.
   const keep = new AbortController();
-  await fetch(`${BASE}/api/rooms/${room}/events?p=${a.id}`, { signal: keep.signal });
+  // Held in a variable: an unreferenced response can be garbage-collected,
+  // which closes its stream mid-test.
+  const kept = await fetch(`${BASE}/api/rooms/${room}/events?p=${a.id}`, { signal: keep.signal });
   const h = (await post('/api/rooms', { name: 'Host' })).data;
   const g = (await post(`/api/rooms/${h.room}/join`, { name: 'Guest' })).data;
   // The host's page is open: its stream keeps the room alive however quiet.
@@ -430,6 +430,7 @@ await t('a host whose page vanished without a word closes the room', async () =>
   assert.equal((await get(`/api/rooms/${room}`)).status, 200, 'a room whose host is still here stays');
   LIMITS.hostGoneMs = saved;
   keep.abort();
+  void kept;
 });
 
 await t('only one meeting at a time', async () => {
@@ -454,16 +455,49 @@ await t('a closed room cannot be rejoined, and takes its transcript with it', as
 // ---- accounts
 const asMe = (path, body) => fetch(BASE + path, {
   method: body ? 'POST' : 'GET',
-  headers: { cookie: `aditya_player=${SESSION}`, ...(body && { 'content-type': 'application/json' }) },
+  headers: { cookie: `speakeasy_session=${SESSION}`, ...(body && { 'content-type': 'application/json' }) },
   body: body && JSON.stringify(body),
 }).then(async (r) => ({ status: r.status, data: await r.json() }));
 
 await t('signed out, /me says so; signed in, it says who', async () => {
   assert.deepEqual((await get('/api/me')).data, { player: null, accounts: true });
   assert.deepEqual((await asMe('/api/me')).data.player, PLAYER);
-  // A cookie of the wrong shape never even leaves the process.
-  const r = await fetch(`${BASE}/api/me`, { headers: { cookie: 'aditya_player=nope' } });
-  assert.equal((await r.json()).player, null);
+  for (const bad of ['nope', SESSION.slice(0, -1) + (SESSION.endsWith('0') ? '1' : '0'), SESSION.replace(/.d+./, '.99999999999999.')]) {
+    const r = await fetch(`${BASE}/api/me`, { headers: { cookie: `speakeasy_session=${bad}` } });
+    assert.equal((await r.json()).player, null, bad);
+  }
+});
+const auth = (path, body, ip) => fetch(`${BASE}/api/auth/${path}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...(ip && { 'x-real-ip': ip }) },
+  body: JSON.stringify(body),
+}).then(async (r) => ({ status: r.status, cookie: r.headers.get('set-cookie'), data: await r.json() }));
+await t('anyone can make an account; no invite code', async () => {
+  const r = await auth('register', { username: 'Cy_9', password: 'longenough' }, '10.0.0.1');
+  assert.equal(r.status, 201);
+  assert.equal(r.data.player.username, 'Cy_9');
+  assert.match(r.cookie, /HttpOnly/);
+  assert.equal((await auth('register', { username: 'cy_9', password: 'longenough' }, '10.0.0.1')).status, 409, 'names are case-blind');
+  assert.equal((await auth('register', { username: 'x', password: 'longenough' }, '10.0.0.1')).status, 400);
+  assert.equal((await auth('register', { username: 'dee', password: 'short' }, '10.0.0.1')).status, 400);
+});
+await t('sign in: right password in, wrong one out, same message for an unknown name', async () => {
+  const ok = await auth('login', { username: 'ADITYA', password: 'correct horse' }, '10.0.0.2');
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.data.player, PLAYER);
+  const wrong = await auth('login', { username: 'aditya', password: 'wrong horse' }, '10.0.0.2');
+  const nobody = await auth('login', { username: 'nobody', password: 'wrong horse' }, '10.0.0.2');
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.data.error, nobody.data.error);
+  const out = await auth('logout', {});
+  assert.match(out.cookie, /Max-Age=0/);
+});
+await t('wrong passwords and new accounts are rate-limited per address', async () => {
+  for (let i = 0; i < 10; i++) await auth('login', { username: 'aditya', password: 'nope nope' }, '10.0.0.3');
+  assert.equal((await auth('login', { username: 'aditya', password: 'correct horse' }, '10.0.0.3')).status, 429);
+  assert.equal((await auth('login', { username: 'aditya', password: 'correct horse' }, '10.0.0.4')).status, 200, 'another address is unaffected');
+  for (let i = 0; i < 5; i++) assert.equal((await auth('register', { username: `spam${i}`, password: 'longenough' }, '10.0.0.5')).status, 201);
+  assert.equal((await auth('register', { username: 'spam5', password: 'longenough' }, '10.0.0.5')).status, 429);
 });
 await t('your notes and meetings are yours alone', async () => {
   assert.equal((await get('/api/me/data')).status, 401);
@@ -520,7 +554,7 @@ await t('a signed-in participant is marked as one', async () => {
 // ---- meeting history
 const as = (session) => (path, body) => fetch(BASE + path, {
   method: body ? 'POST' : 'GET',
-  headers: { cookie: `aditya_player=${session}`, ...(body && { 'content-type': 'application/json' }) },
+  headers: { cookie: `speakeasy_session=${session}`, ...(body && { 'content-type': 'application/json' }) },
   body: body && JSON.stringify(body),
 }).then(async (r) => ({ status: r.status, data: await r.json() }));
 const host1 = as(SESSION);
@@ -614,4 +648,3 @@ console.log(`\n${pass} passed${process.exitCode ? ', some FAILED' : ''}`);
 server.closeAllConnections();
 server.close();
 fakeModerator.close();
-fakeAccounts.close();

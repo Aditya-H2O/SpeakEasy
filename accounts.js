@@ -1,41 +1,98 @@
-// Accounts: aditya-h.com's visitor accounts, not a second set.
+// Accounts: SpeakEasy's own, separate from the rest of aditya-h.com.
 //
-// The site already has one accounts system -- the `players` table Grounds
-// Guessr owns and VS reads, with one signed session cookie (`aditya_player`,
-// path `/`) for the whole domain. SpeakEasy joins it rather than starting a
-// third: one sign-in covers every app, and registering still needs the invite
-// code Grounds Guessr owns, which is what keeps "specified users" specified.
+// Grounds Guessr and VS share a `players` table and one site-wide cookie.
+// SpeakEasy uses neither. It keeps its own small list of accounts in one JSON
+// file (SPEAKEASY_ACCOUNTS_FILE) and signs its own session cookie
+// (`speakeasy_session`, path SPEAKEASY_COOKIE_PATH) with its own key
+// (SPEAKEASY_SESSION_KEY_FILE, made on first start). Signing in here does not
+// sign you in anywhere else on the site, and the other way round.
 //
-// It does that WITHOUT holding the signing key or touching Postgres. To learn
-// who a request belongs to, it forwards that one cookie, over loopback, to
-// Grounds Guessr's own `GET /api/auth/me` and believes the answer. The key stays
-// in the two apps that already have it, and a SpeakEasy compromise cannot mint
-// sessions for anyone. The answer is cached for a minute per cookie, so a
-// meeting full of signed-in people costs Grounds Guessr almost nothing.
+// Anyone can make an account: there is no invite code. What keeps that from
+// being abused is rate limits per address (new accounts, wrong passwords) and a
+// ceiling on the number of accounts. Passwords are hashed with scrypt.
 //
 // What an account buys here: your notes and scheduled meetings (with their
-// to-do lists) are stored on the server under your player id instead of in one
-// browser, so they follow you between devices and between the website and the
-// extension. They live in SPEAKEASY_USER_DIR/<player id>.json.
+// to-do lists) are stored on the server under your account id instead of in
+// one browser, so they follow you between devices and between the website and
+// the extension. They live in SPEAKEASY_USER_DIR/<account id>.json.
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
-const ME_URL = process.env.SPEAKEASY_ACCOUNTS_ME_URL || 'http://127.0.0.1:3005/groundsguessr/api/auth/me';
 const USER_DIR = process.env.SPEAKEASY_USER_DIR || '';
-const COOKIE = 'aditya_player';
-const CACHE_MS = 60_000;
+const BASE_DIR = USER_DIR ? path.dirname(path.resolve(USER_DIR)) : '';
+const ACCOUNTS_FILE = process.env.SPEAKEASY_ACCOUNTS_FILE || (BASE_DIR && path.join(BASE_DIR, 'accounts.json'));
+const KEY_FILE = process.env.SPEAKEASY_SESSION_KEY_FILE || (BASE_DIR && path.join(BASE_DIR, 'session.key'));
+const COOKIE = 'speakeasy_session';
+const COOKIE_PATH = process.env.SPEAKEASY_COOKIE_PATH || '/';
+const SESSION_MS = 180 * 24 * 60 * 60 * 1000;
 
-export const DATA_LIMITS = {
-  notesChars: 200_000,
-  plans: 100,
-  todosPerPlan: 200,
-  todoChars: 300,
-  titleChars: 80,
-  bodyBytes: 600 * 1024, // nginx caps /speakeasy/api/me/ to match
+export const ACCOUNT_LIMITS = {
+  accounts: 2000,
+  registerPerHour: 5, // new accounts per address
+  failedLoginsPer10Min: 10, // wrong passwords per address, then 10 minutes locked out
 };
 
-const cache = new Map(); // cookie value -> { player, at }
+const USERNAME = /^[A-Za-z0-9_.-]{3,24}$/;
+const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }; // 16MB per hash
+
+export const accountsEnabled = () => !!(USER_DIR && ACCOUNTS_FILE && KEY_FILE);
+
+// ---- the key and the account list ---------------------------------------------
+
+let key = null;
+function sessionKey() {
+  if (key) return key;
+  try {
+    key = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8').trim(), 'hex');
+    if (key.length < 32) throw new Error('short key');
+  } catch {
+    key = crypto.randomBytes(32);
+    fs.mkdirSync(path.dirname(KEY_FILE), { recursive: true });
+    fs.writeFileSync(KEY_FILE, key.toString('hex'), { mode: 0o600 });
+  }
+  return key;
+}
+
+let db = null; // { users: { id: { id, username, salt, hash, createdAt } } }
+function load() {
+  if (db) return db;
+  try { db = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')); } catch { db = null; }
+  if (!db || typeof db.users !== 'object' || !db.users) db = { users: {} };
+  return db;
+}
+function save() {
+  fs.mkdirSync(path.dirname(ACCOUNTS_FILE), { recursive: true });
+  const tmp = `${ACCOUNTS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(db), { mode: 0o600 });
+  fs.renameSync(tmp, ACCOUNTS_FILE);
+}
+const byName = (username) => Object.values(load().users).find((u) => u.username.toLowerCase() === username.toLowerCase());
+
+const scrypt = (password, salt) => new Promise((resolve, reject) =>
+  crypto.scrypt(password, salt, 64, SCRYPT, (err, buf) => (err ? reject(err) : resolve(buf))));
+
+// ---- rate limits ----------------------------------------------------------------
+
+const hits = new Map(); // `${kind}:${ip}` -> { count, since, lockedUntil }
+function limited(kind, ip) {
+  const h = hits.get(`${kind}:${ip}`);
+  return !!(h && h.lockedUntil > Date.now());
+}
+function count(kind, ip, limit, windowMs) {
+  const t = Date.now();
+  let h = hits.get(`${kind}:${ip}`);
+  if (!h || t - h.since > windowMs) h = { count: 0, since: t, lockedUntil: 0 };
+  h.count++;
+  if (h.count >= limit) h.lockedUntil = t + windowMs;
+  hits.set(`${kind}:${ip}`, h);
+  if (hits.size > 10000) for (const [k, v] of hits) if (t - v.since > windowMs && v.lockedUntil < t) hits.delete(k);
+}
+
+// ---- sessions ---------------------------------------------------------------------
+
+const sign = (payload) => crypto.createHmac('sha256', sessionKey()).update(payload).digest('hex');
 
 function cookieValue(req) {
   const header = req.headers.cookie || '';
@@ -46,40 +103,86 @@ function cookieValue(req) {
   return null;
 }
 
-/** The signed-in player for this request, `{ id, username }`, or null. */
+// Lax, not None: the website is same-site, and Chrome treats an extension's
+// requests to a host it has permission for as same-site too.
+const cookie = (value, maxAgeS) =>
+  `${COOKIE}=${value}; Path=${COOKIE_PATH}; Max-Age=${maxAgeS}; HttpOnly; Secure; SameSite=Lax`;
+
+function sessionCookie(id) {
+  const payload = `${id}.${Date.now() + SESSION_MS}`;
+  return cookie(`${payload}.${sign(payload)}`, SESSION_MS / 1000);
+}
+export const signOutCookie = () => cookie('', 0);
+
+/** The signed-in account for this request, `{ id, username }`, or null. */
 export async function whoami(req) {
+  if (!accountsEnabled()) return null;
   const value = cookieValue(req);
-  // Shape check before anything leaves this process: `<uuid>.<expiry>.<hmac>`.
-  if (!value || !/^[0-9a-f-]{36}\.\d+\.[0-9a-f]{64}$/.test(value)) return null;
-  const hit = cache.get(value);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.player;
-  let player = null;
-  try {
-    const res = await fetch(ME_URL, { headers: { cookie: `${COOKIE}=${value}` }, signal: AbortSignal.timeout(3000) });
-    if (res.ok) {
-      const body = await res.json();
-      const p = body && body.player;
-      if (p && /^[0-9a-f-]{36}$/.test(p.id) && typeof p.username === 'string') player = { id: p.id, username: p.username };
-    }
-  } catch {
-    // Grounds Guessr down: treat as signed out rather than guess. Personal data
-    // stays where it is; the page falls back to this browser's copy.
-    return null;
+  const m = value && /^([0-9a-f-]{36})\.(\d{1,15})\.([0-9a-f]{64})$/.exec(value);
+  if (!m || Number(m[2]) < Date.now()) return null;
+  const want = Buffer.from(sign(`${m[1]}.${m[2]}`), 'hex');
+  if (!crypto.timingSafeEqual(want, Buffer.from(m[3], 'hex'))) return null;
+  const u = load().users[m[1]];
+  return u ? { id: u.id, username: u.username } : null;
+}
+
+const NOT_SET_UP = { status: 503, body: { error: 'Accounts are not set up on this server.' } };
+
+/** Make an account. Returns `{ status, body, cookie? }`. */
+export async function register(ip, body) {
+  if (!accountsEnabled()) return NOT_SET_UP;
+  const username = String((body && body.username) || '').trim();
+  const password = String((body && body.password) || '');
+  if (!USERNAME.test(username)) return { status: 400, body: { error: 'Usernames are 3 to 24 letters, digits, dots, dashes or underscores.' } };
+  if (password.length < 8 || password.length > 200) return { status: 400, body: { error: 'Passwords need at least 8 characters.' } };
+  if (limited('register', ip)) return { status: 429, body: { error: 'Too many new accounts from here. Try again in an hour.' } };
+  if (byName(username)) return { status: 409, body: { error: 'That username is taken.' } };
+  if (Object.keys(load().users).length >= ACCOUNT_LIMITS.accounts) return { status: 503, body: { error: 'No new accounts right now.' } };
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = (await scrypt(password, salt)).toString('hex');
+  // scrypt yields to the event loop: someone may have taken the name meanwhile.
+  if (byName(username)) return { status: 409, body: { error: 'That username is taken.' } };
+  count('register', ip, ACCOUNT_LIMITS.registerPerHour, 60 * 60 * 1000);
+  const id = crypto.randomUUID();
+  load().users[id] = { id, username, salt, hash, createdAt: Date.now() };
+  save();
+  return { status: 201, body: { player: { id, username } }, cookie: sessionCookie(id) };
+}
+
+const DUMMY_SALT = crypto.randomBytes(16).toString('hex');
+
+/** Sign in. The same answer for a wrong name and a wrong password. */
+export async function login(ip, body) {
+  if (!accountsEnabled()) return NOT_SET_UP;
+  if (limited('login', ip)) return { status: 429, body: { error: 'Too many tries. Wait 10 minutes and try again.' } };
+  const username = String((body && body.username) || '').trim();
+  const password = String((body && body.password) || '').slice(0, 200);
+  const u = USERNAME.test(username) ? byName(username) : null;
+  // Hash even for an unknown name, so the time taken does not say which it was.
+  const got = await scrypt(password, u ? u.salt : DUMMY_SALT);
+  if (!u || !crypto.timingSafeEqual(got, Buffer.from(u.hash, 'hex'))) {
+    count('login', ip, ACCOUNT_LIMITS.failedLoginsPer10Min, 10 * 60 * 1000);
+    return { status: 401, body: { error: 'Wrong username or password.' } };
   }
-  if (cache.size > 1000) cache.clear();
-  cache.set(value, { player, at: Date.now() });
-  return player;
+  return { status: 200, body: { player: { id: u.id, username: u.username } }, cookie: sessionCookie(u.id) };
 }
 
 // ---- per-account data -------------------------------------------------------
+
+export const DATA_LIMITS = {
+  notesChars: 200_000,
+  plans: 100,
+  todosPerPlan: 200,
+  todoChars: 300,
+  titleChars: 80,
+  bodyBytes: 600 * 1024, // nginx caps /speakeasy/api/me/ to match
+};
 
 const EMPTY = () => ({ version: 0, notes: '', plans: [], activePlan: null, updatedAt: null });
 const fileFor = (id) => {
   if (!USER_DIR || !/^[0-9a-f-]{36}$/.test(id)) return null;
   return path.join(USER_DIR, `${id}.json`);
 };
-
-export const accountsEnabled = () => !!USER_DIR;
 
 export function readData(id) {
   const file = fileFor(id);

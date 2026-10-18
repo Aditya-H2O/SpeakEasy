@@ -7,11 +7,19 @@
 // speech service, which is how the Web Speech API has always worked; the page
 // says which of the two is happening. SpeakEasy's own server only ever
 // receives the finished text.
+//
+// Brave has the same SpeechRecognition object but no access to Google's
+// service behind it, so every session fails with 'network'. It is detected and
+// told so, rather than retried forever.
 
 (() => {
   'use strict';
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const isBrave = () => !!(navigator.brave && typeof navigator.brave.isBrave === 'function');
+  const NO_SERVICE = 'Chrome’s speech service can’t be reached from this browser, so nothing is being transcribed. '
+    + 'Brave, plain Chromium, and some VPNs or ad-blockers block it. Use Google Chrome or Edge. Talk time still counts.';
+  const MAX_NETWORK_FAILS = 4;
 
   class Transcriber {
     /**
@@ -29,6 +37,8 @@
       this.rec = null;
       this.uttStart = null;
       this.restarts = 0;
+      this.networkFails = 0;
+      this.gaveUp = null; // why transcription can never work on this page, once known
       this.mode = 'cloud';
     }
 
@@ -36,10 +46,17 @@
 
     async start() {
       if (!SR || this.want) return;
+      // app.js asks again on every room update; do not retry a lost cause.
+      if (this.gaveUp) return this.onState('error', this.gaveUp);
       this.want = true;
+      this.networkFails = 0;
       this.onState('starting');
       this.mode = await this.preferOnDevice();
-      if (this.want) this.spawn();
+      if (!this.want) return;
+      if (this.mode === 'cloud' && isBrave()) {
+        return this.giveUp('Brave can’t transcribe speech: it blocks the speech service this needs. Open SpeakEasy in Google Chrome or Edge to be transcribed. Talk time still counts.');
+      }
+      this.spawn();
     }
 
     stop() {
@@ -47,6 +64,12 @@
       if (this.rec) { try { this.rec.abort(); } catch {} }
       this.rec = null;
       this.onState('off');
+    }
+
+    giveUp(why) {
+      this.gaveUp = why;
+      this.want = false;
+      this.onState('error', why);
     }
 
     // Newer Chrome can recognise speech on the device. Feature-detected all the
@@ -70,8 +93,11 @@
       rec.interimResults = true; // only to learn when an utterance STARTED
       if (this.mode === 'on-device' && 'processLocally' in rec) rec.processLocally = true;
 
-      rec.onstart = () => { this.restarts = 0; this.onState(this.mode); };
+      rec.onstart = () => { rec.startedAt = Date.now(); this.onState(this.mode); };
       rec.onresult = (e) => {
+        // Words came back: the service works, so failures so far were blips.
+        this.restarts = 0;
+        this.networkFails = 0;
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const r = e.results[i];
           this.uttStart ??= Date.now();
@@ -91,7 +117,12 @@
           this.want = false;
           this.onState('error', `Speech recognition does not support ${this.lang}.`);
         } else if (e.error === 'network') {
-          this.onState('error', 'Speech recognition lost its connection; retrying.');
+          // A blip, or a service this browser can never reach. Say which.
+          if (++this.networkFails >= MAX_NETWORK_FAILS) {
+            this.giveUp(NO_SERVICE);
+          } else {
+            this.onState('error', 'Speech recognition lost its connection; retrying.');
+          }
         }
       };
       // Chrome ends a session after a minute or so of silence, and sometimes
@@ -101,6 +132,8 @@
         this.rec = null;
         this.uttStart = null;
         if (!this.want) return;
+        // A session that ran a while (Chrome's silence timeout) is no failure.
+        if (rec.startedAt && Date.now() - rec.startedAt > 5000) this.restarts = 0;
         const wait = Math.min(250 * 2 ** this.restarts++, 10000);
         setTimeout(() => { if (this.want && !this.rec) this.spawn(); }, wait);
       };

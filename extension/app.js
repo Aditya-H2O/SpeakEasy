@@ -103,18 +103,10 @@
 
   // -------------------------------------------------------------- account --
   //
-  // aditya-h.com's visitor accounts (Grounds Guessr's, shared by VS): signing
-  // in here calls that app's own login, which sets the site-wide session
-  // cookie. SpeakEasy's server asks who that cookie is (api/me) and keeps your
-  // notes and scheduled meetings under that account. Optional throughout.
-
-  const SITE = CFG.site || ''; // the extension has to name the domain
-  const accountApi = (path, body) => fetch(`${SITE}/groundsguessr/api/auth/${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body || {}),
-    credentials: REMOTE ? 'include' : 'same-origin',
-  });
+  // SpeakEasy's own accounts (accounts.js on the server), separate from the
+  // rest of aditya-h.com. Signing in sets SpeakEasy's session cookie; the
+  // server keeps your notes, scheduled meetings and meeting history under that
+  // account. Anyone can make one. Optional throughout.
 
   async function refreshMe() {
     const r = await api('me').catch(() => null);
@@ -138,12 +130,10 @@
   let registering = false;
   $('signin-toggle').addEventListener('click', () => {
     registering = !registering;
-    $('signin-invite').hidden = !registering;
-    $('signin-invite').required = registering;
     $('signin-title').textContent = registering ? 'Make an account' : 'Sign in';
     $('signin-go').textContent = registering ? 'Make my account' : 'Sign in';
     $('signin-pass').autocomplete = registering ? 'new-password' : 'current-password';
-    $('signin-toggle').textContent = registering ? 'I already have an account' : 'I have an invite code (make an account)';
+    $('signin-toggle').textContent = registering ? 'I already have an account' : 'New here? Make an account';
     $('signin-error').textContent = '';
   });
 
@@ -153,17 +143,12 @@
     $('signin-go').disabled = true;
     try {
       const body = { username: $('signin-user').value.trim(), password: $('signin-pass').value };
-      if (registering) body.inviteCode = $('signin-invite').value.trim();
-      const res = await accountApi(registering ? 'register' : 'login', body);
-      const data = await res.json().catch(() => ({}));
+      const res = await api(`auth/${registering ? 'register' : 'login'}`, body);
       if (!res.ok) {
-        $('signin-error').textContent = res.status === 429
-          ? 'Too many tries. Wait a minute and try again.'
-          : data.error || 'That did not work. Check the name and password.';
+        $('signin-error').textContent = (res.data && res.data.error) || 'That did not work. Check the name and password.';
         return;
       }
       $('signin-pass').value = '';
-      $('signin-invite').value = '';
       await refreshMe();
     } catch {
       $('signin-error').textContent = 'Could not reach the sign-in service.';
@@ -173,11 +158,11 @@
   });
 
   $('signout').addEventListener('click', async () => {
-    await accountApi('logout').catch(() => {});
+    await api('auth/logout', {}).catch(() => {});
     await refreshMe();
   });
 
-  // Signed in or out in another tab (or another app on the site): catch up.
+  // Signed in or out in another tab: catch up.
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshMe(); });
 
   // ---------------------------------------------------------------- lobby --
@@ -1137,7 +1122,7 @@
         const name = li.querySelector('.person-name');
         name.textContent = p.name; // textContent, never innerHTML: names come from strangers
         if (p.id === S.me.id) name.insertAdjacentHTML('beforeend', '<span class="you">you</span>');
-        if (p.account) name.insertAdjacentHTML('beforeend', '<span class="acct" title="Signed in to an aditya-h.com account">✓</span>');
+        if (p.account) name.insertAdjacentHTML('beforeend', '<span class="acct" title="Signed in to a SpeakEasy account">✓</span>');
         if (p.host) name.insertAdjacentHTML('beforeend', '<span class="tag">host</span>');
         if (tag) name.insertAdjacentHTML('beforeend', `<span class="tag">${tag}</span>`);
 

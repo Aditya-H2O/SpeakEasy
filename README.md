@@ -66,12 +66,17 @@ the transcript in its own scrolling pane; one column on narrow screens):
 - **One meeting at a time**, for now. Starting a second room is refused, and the
   lobby says so, without revealing the running room's code.
 
-**Accounts.** SpeakEasy uses aditya-h.com's existing visitor accounts, the same
-sign-in as Grounds Guessr and VS. Making one needs the site's invite code. Sign
-in with the **Sign in** button in the header (it opens a window); it is optional, and anyone can join a meeting without one.
-Signed-in people get a ✓ in the room. SpeakEasy never sees your password hash
-or holds the site's session key: it asks Grounds Guessr, over loopback, who your
-session cookie belongs to.
+**Accounts.** SpeakEasy has its own accounts, separate from Grounds Guessr and
+VS: a SpeakEasy account does not sign you in to them, nor the other way round.
+Anyone can make one; there is no invite code. Sign in or make one with the
+**Sign in** button in the header (it opens a window). It is optional, and anyone
+can join a meeting without one. Signed-in people get a ✓ in the room.
+Passwords are hashed with scrypt; the account list is
+`/mnt/twenty_gb_volume/speakeasy/accounts.json`, and sessions are a cookie
+(`speakeasy_session`, path `/speakeasy/`) signed with SpeakEasy's own key
+(`session.key` beside it, made on first start). New accounts are limited to 5
+an hour per address, wrong passwords to 10 per 10 minutes per address, and
+2,000 accounts in all.
 
 **Meeting history**, at the bottom of the home page when signed in: your past
 meetings, **10 to a page** with Newer/Older buttons (no endless scroll). Open
@@ -101,7 +106,9 @@ export and import to move things between them, or sign in.
 ## Privacy, plainly
 
 - **Talk time** is decided on the laptop. Only the totals leave it.
-- **Speech-to-text** is Chrome's built-in speech recognition. Where Chrome can
+- **Speech-to-text** is Chrome's built-in speech recognition. It needs Google
+  Chrome or Edge: **Brave** (and plain Chromium) has the same API but cannot
+  reach the speech service behind it, so the page says so instead of retrying. Where Chrome can
   do it on the device, audio stays on the laptop. Otherwise Chrome sends the
   audio to Google's speech service to transcribe. The page says which is
   happening. SpeakEasy's server only ever receives the text.
@@ -121,7 +128,7 @@ web/vad-worklet.js     voice activity detection on the audio thread
 web/transcribe.js      speech-to-text for one person (Web Speech API)
 web/personal.js        notes, scheduled meetings, to-do lists (account or localStorage)
 web/summarize.js       the host's on-device AI summary (Chrome Summarizer API)
-accounts.js            who a request is (via Grounds Guessr), and per-account data
+accounts.js            SpeakEasy's own accounts and sessions, and per-account data
 history.js             archived meetings and each account's paged list
 web/meetings.js        the meeting history list and viewer
 web/app.js             the room: mic, reporting, transcript, pings, nudges
@@ -205,7 +212,10 @@ are JSON, capped at 4KB.
 | `POST rooms/:code/interrupted {secret, victim}` | your page saw you cut in; tells the host |
 | `GET me/meetings?page=N` | your history, 10 per page, newest first |
 | `GET me/meetings/:id` / `POST me/meetings/:id/remove` | one meeting in full; take it off your list |
-| `GET me` | `{player, accounts}`: who your aditya-h.com session is |
+| `POST auth/register {username, password}` | make an account and sign in (sets the session cookie) |
+| `POST auth/login {username, password}` | sign in |
+| `POST auth/logout` | clears the session cookie |
+| `GET me` | `{player, accounts}`: who your SpeakEasy session is |
 | `GET me/data` / `POST me/data {version, notes, plans, activePlan}` | your saved data; a stale `version` gets 409 and the newer copy |
 | `GET health` | |
 

@@ -3,8 +3,6 @@
 // and has to name the server outright.
 window.SPEAKEASY = {
   api: 'https://aditya-h.com/speakeasy/api/',
-  // The site itself, for signing in to the shared aditya-h.com accounts.
-  site: 'https://aditya-h.com',
   // Invite links point at the web app, so people without the extension can
   // join the same room from any browser.
   invite: 'https://aditya-h.com/speakeasy/',

@@ -30,13 +30,16 @@ Environment=PORT=3008
 StateDirectory=speakeasy
 Environment=SPEAKEASY_STATE_FILE=/var/lib/speakeasy/rooms.json
 
-# Accounts: who a request belongs to is asked of Grounds Guessr over loopback
-# (this app never holds the site's session key), and each account's notes and
-# scheduled meetings are one JSON file here. On the volume, because it is
-# user data that grows with users -- the site's rule for what goes where.
-# The directory must exist and belong to www-data; see README "Deploy".
-Environment=SPEAKEASY_ACCOUNTS_ME_URL=http://127.0.0.1:3005/groundsguessr/api/auth/me
+# Accounts: SpeakEasy's own (accounts.js), separate from Grounds Guessr's and
+# VS's. The account list and the session-signing key (made on first start)
+# sit beside the per-account data. On the volume, because it is user data that
+# grows with users -- the site's rule for what goes where. The directories must
+# exist and belong to www-data; see README "Deploy". The session cookie is
+# scoped to /speakeasy/, so no other app on the site ever receives it.
 Environment=SPEAKEASY_USER_DIR=/mnt/twenty_gb_volume/speakeasy/users
+Environment=SPEAKEASY_ACCOUNTS_FILE=/mnt/twenty_gb_volume/speakeasy/accounts.json
+Environment=SPEAKEASY_SESSION_KEY_FILE=/mnt/twenty_gb_volume/speakeasy/session.key
+Environment=SPEAKEASY_COOKIE_PATH=/speakeasy/
 # Archived meetings (history.js): one file per meeting, plus each account's list.
 Environment=SPEAKEASY_MEETING_DIR=/mnt/twenty_gb_volume/speakeasy/meetings
 

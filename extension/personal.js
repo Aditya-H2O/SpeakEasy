@@ -4,7 +4,7 @@
 // each. Export and import are plain .txt, one to-do per line.
 //
 // Where they live depends on whether you are signed in:
-//  - signed in to an aditya-h.com account: on the server, under your account
+//  - signed in to a SpeakEasy account: on the server, under your account
 //    (api/me/data), so they follow you to any device and into the extension;
 //  - signed out: in this browser's localStorage, and nowhere else.
 // The first time you sign in, anything already in this browser moves up to
